@@ -1,5 +1,5 @@
 streamlit
-curl_cffi
+httpx
 beautifulsoup4
 lxml
 pandas
