@@ -3,3 +3,4 @@ undetected-chromedriver
 beautifulsoup4
 lxml
 pandas
+setuptools
