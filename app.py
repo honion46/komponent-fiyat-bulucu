@@ -16,7 +16,7 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
 }
 
-# Robocombo URL'si güncellendi
+# 14 Adet Popüler Pazar Yeri ve Komponent Sitesi (URL'ler Doğrulandı)
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
     "Direnc.net": "https://www.direnc.net/arama?q={query}",
@@ -24,10 +24,10 @@ SEARCH_URL_TEMPLATES = {
     "Samm Market": "https://market.samm.com/search?s={query}",
     "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
     "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
-    "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama?q={query}",
-    "F1 Depo": "https://www.f1depo.com/arama?q={query}",
+    "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama/{query}",
+    "F1 Depo": "https://www.f1depo.com/arama/{query}",
     "Özdisan": "https://www.ozdisan.com/Product/Search?searchtext={query}",
-    "Robotzade": "https://www.robotzade.com/arama?q={query}",
+    "Robotzade": "https://www.robotzade.com/arama/{query}",
     "Trendyol": "https://www.trendyol.com/sr?q={query}",
     "Hepsiburada": "https://www.hepsiburada.com/ara?q={query}",
     "N11": "https://www.n11.com/arama?q={query}",
@@ -76,14 +76,14 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
         if not text or not href or text.lower() in IGNORE_LINK_TEXT or href.startswith("#") or "javascript:" in href:
             continue
         
-        # Pazar yerlerinde alakasız önerileri filtrelemek için kelime kontrolü
+        # Alakasız önerileri filtrelemek için kelime kontrolü
         if keywords and not any(k in text.lower() for k in keywords):
             continue
 
         full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
         link_queue.append((text, full_url))
 
-    # Metin akışından Link -> Fiyat eşleştirmesi
+    # Orijinal v2 mantığı: Metin akışından Link -> Fiyat eşleştirmesi
     raw_lines = [ln.strip() for ln in soup.get_text(separator="\n").split("\n") if ln.strip()]
     lines = []
     i = 0
@@ -122,7 +122,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
         if candidate_name:
             gap_counter += 1
-            if gap_counter > 10:
+            if gap_counter > 10:  # Boşluk toleransı
                 candidate_name = None
                 candidate_url = None
 
@@ -133,7 +133,7 @@ async def search_site(client: httpx.AsyncClient, site: str, url_template: str, q
     url = url_template.format(query=encoded_query)
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
     
-    # Direnc.net için ücretsiz köprü kullanımı
+    # Bazı siteler için (Örn: Direnc.net) ücretsiz köprü kullanımı
     if site == "Direnc.net":
         fetch_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}"
     else:
@@ -141,6 +141,7 @@ async def search_site(client: httpx.AsyncClient, site: str, url_template: str, q
 
     try:
         resp = await client.get(fetch_url, headers=HEADERS, timeout=15, follow_redirects=True)
+        # Hepsiburada / Amazon gibi siteler bot koruması ile 403 veya 503 döndürebilir
         if resp.status_code != 200:
             return site, [], f"Sunucu Engeli (HTTP {resp.status_code})"
     except Exception as e:
