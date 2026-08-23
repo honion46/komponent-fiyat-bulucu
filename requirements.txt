@@ -1,6 +1,5 @@
 streamlit
-selenium
-webdriver-manager
+curl-cffi
 beautifulsoup4
 lxml
 pandas
