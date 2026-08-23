@@ -1,27 +1,3 @@
-import sys
-import types
-
-# --- PYTHON 3.12+ İÇİN DISTUTILS YAMASI ---
-# undetected-chromedriver'ın eski distutils paketini arayıp çökmesini engeller.
-if "distutils" not in sys.modules:
-    distutils = types.ModuleType("distutils")
-    sys.modules["distutils"] = distutils
-    distutils_version = types.ModuleType("distutils.version")
-    sys.modules["distutils.version"] = distutils_version
-    
-    class LooseVersion:
-        def __init__(self, v):
-            self.v = str(v)
-        def __lt__(self, other): return self.v < str(other.v if hasattr(other, 'v') else other)
-        def __le__(self, other): return self.v <= str(other.v if hasattr(other, 'v') else other)
-        def __eq__(self, other): return self.v == str(other.v if hasattr(other, 'v') else other)
-        def __ge__(self, other): return self.v >= str(other.v if hasattr(other, 'v') else other)
-        def __gt__(self, other): return self.v > str(other.v if hasattr(other, 'v') else other)
-        def __str__(self): return self.v
-        
-    distutils_version.LooseVersion = LooseVersion
-# -------------------------------------------
-
 import concurrent.futures
 import os
 import re
@@ -32,12 +8,14 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-import undetected_chromedriver as uc
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
-# 14 Adet Popüler Site
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
     "Direnc.net": "https://www.direnc.net/arama?q={query}",
@@ -227,24 +205,43 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
     return results
 
-def get_uc_driver():
-    options = uc.ChromeOptions()
-    options.headless = True 
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    
-    driver = uc.Chrome(options=options, use_subprocess=True)
+def get_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+
+    try:
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'},
+    )
     return driver
 
-def scrape_site_uc(site: str, url_tmpl: str, query: str):
+def scrape_site(site: str, url_tmpl: str, query: str):
     encoded_query = urllib.parse.quote_plus(query)
     url = url_tmpl.format(query=encoded_query)
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
 
     driver = None
     try:
-        driver = get_uc_driver()
-        driver.set_page_load_timeout(30)
+        driver = get_driver()
+        driver.set_page_load_timeout(25)
         driver.get(url)
 
         selector = SITE_WAIT_SELECTORS.get(site)
@@ -254,10 +251,10 @@ def scrape_site_uc(site: str, url_tmpl: str, query: str):
             except Exception:
                 pass
         else:
-            time.sleep(4.0)
+            time.sleep(3.0)
 
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-        time.sleep(2.0)
+        time.sleep(1.0)
 
         html = driver.page_source
         products = extract_products(html, base_url, site, query)
@@ -265,7 +262,7 @@ def scrape_site_uc(site: str, url_tmpl: str, query: str):
         status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
         return site, products, status
     except Exception as e:
-        return site, [], f"Bağlantı Hatası / Engellendi ({e.__class__.__name__})"
+        return site, [], f"Bağlantı Hatası / Engellendi"
     finally:
         if driver:
             try:
@@ -273,10 +270,10 @@ def scrape_site_uc(site: str, url_tmpl: str, query: str):
             except Exception:
                 pass
 
-def search_all_uc(query: str):
+def search_all_selenium(query: str):
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(scrape_site_uc, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
+        futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())
@@ -285,7 +282,7 @@ def search_all_uc(query: str):
     return results
 
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-st.title("⚡ Komponent Fiyat Karşılaştırma (Undetected Motoru)")
+st.title("⚡ Komponent Fiyat Karşılaştırma (Bulut Uyumlu)")
 
 query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
@@ -294,7 +291,7 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
         st.warning("Lütfen bir ürün adı girin.")
     else:
         with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (Lütfen bekleyin)..."):
-            site_results = search_all_uc(query)
+            site_results = search_all_selenium(query)
 
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
             for site, prods, status in site_results:
@@ -308,7 +305,7 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
         all_products = [p for _, prods, _ in site_results for p in prods]
 
         if not all_products:
-            st.error("Hiçbir sitede sonuç bulunamadı.")
+            st.error("Hiçbir sitede sonuç bulunamadı. Lütfen daha genel bir arama yapın.")
         else:
             all_products.sort(key=lambda p: (p.price is None, p.price or 0))
             data = [
