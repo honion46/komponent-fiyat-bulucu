@@ -8,20 +8,21 @@ import pandas as pd
 import streamlit as st
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site",
+    "Upgrade-Insecure-Requests": "1",
 }
 
-# Doğrulanmış Arama Kalıpları
+# Her sitenin gerçek ve doğrulanmış arama URL'leri
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
+    "Motorobit": "https://www.motorobit.com/arama?kelime={query}",
     "Direnc.net": "https://www.direnc.net/arama?q={query}",
-    "Motorobit": "https://www.motorobit.com/arama?q={query}",
-    "Samm Market": "https://market.samm.com/arama?q={query}",
+    "Samm Market": "https://market.samm.com/search?q={query}",
 }
 
 PRICE_RE = re.compile(r"([\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)", re.IGNORECASE)
@@ -43,21 +44,18 @@ def parse_price(raw: str) -> float | None:
 def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     
-    # Gereksiz kısımları temizle
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
         tag.decompose()
 
     results = []
     seen_urls = set()
 
-    # 1. Aşama: Bilinen ürün kartı yapılarını tara
     cards = soup.select(
         ".productItem, .showcase, .product-card, .product-item, .item-grid, "
-        ".productBox, .product-detail-card, .catalog-item, div[data-product-id]"
+        ".productBox, .product-detail-card, .catalog-item, div[data-product-id], .product"
     )
 
     for card in cards:
-        # İsim ve Link bul
         name_tag = card.select_one("a.product-name, a.productName, a.product-title, .name a, a[title], h3 a, h2 a")
         if not name_tag:
             name_tag = card.find("a", href=True)
@@ -72,7 +70,6 @@ def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
         if full_url in seen_urls or full_url.startswith("#") or "javascript:" in full_url:
             continue
 
-        # Fiyat bul
         card_text = card.get_text(separator=" ")
         price_match = PRICE_RE.search(card_text)
         price = parse_price(price_match.group(1)) if price_match else None
@@ -80,7 +77,7 @@ def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
         results.append(Product(site=site_name, name=name, price=price, url=full_url))
         seen_urls.add(full_url)
 
-    # 2. Aşama: Eğer kart seçiciler hiçbir şey bulamadıysa genel link & fiyat taraması
+    # Yedek genel metin taraması
     if not results:
         for a in soup.find_all("a", href=True):
             name = a.get_text(strip=True)
@@ -92,7 +89,6 @@ def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
             if full_url in seen_urls:
                 continue
 
-            # Linkin üst kapsayıcısında fiyat ara
             parent = a.find_parent(["div", "li", "td", "article"])
             if parent:
                 parent_text = parent.get_text(separator=" ")
@@ -110,6 +106,7 @@ async def search_site(client: httpx.AsyncClient, site: str, url_template: str, q
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
     
     headers = HEADERS.copy()
+    headers["Host"] = base_url.replace("https://", "").replace("http://", "")
     headers["Referer"] = base_url
     
     try:
@@ -141,8 +138,7 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
         with st.spinner("Siteler taranıyor..."):
             site_results = asyncio.run(search_all(query))
         
-        # Tarama durumlarını göster
-        with st.expander("🔍 Site Tarama Durumları", expanded=False):
+        with st.expander("🔍 Site Tarama Durumları", expanded=True):
             for site, prods, status in site_results:
                 st.write(f"**{site}:** {status}")
 
