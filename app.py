@@ -1,21 +1,18 @@
 import concurrent.futures
-import os
 import re
-import time
 import urllib.parse
 from dataclasses import dataclass
+import time
 
 import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
+# 14 Adet Popüler Site
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
     "Direnc.net": "https://www.direnc.net/arama?q={query}",
@@ -50,16 +47,12 @@ IGNORE_LINK_TEXT = {
     "hesabım", "sepetim", "günün fırsatları", "müşteri hizmetleri", "satış yap",
 }
 
-DEBUG_DIR = "debug_snapshots"
-
-
 @dataclass
 class Product:
     site: str
     name: str
     price: float | None
     url: str
-
 
 def parse_price(raw: str) -> float | None:
     raw = raw.strip().replace(".", "").replace(",", ".")
@@ -69,7 +62,6 @@ def parse_price(raw: str) -> float | None:
         return None
 
 def clean_text(text: str) -> str:
-    """Metindeki gereksiz boşlukları temizler ve upuzun kod yığınlarını engeller."""
     cleaned = re.sub(r'\s+', ' ', text).strip()
     if len(cleaned) > 130:
         cleaned = cleaned[:127] + "..."
@@ -79,7 +71,6 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
     
-    # JSON, SVG, Template gibi gizli kodları sayfadan söküp at (Tablonun bozulmasını önler)
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside", "template", "meta", "svg", "path"]):
         tag.decompose()
 
@@ -151,7 +142,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
                 products.append(Product(site_name, name, price, full_url))
         return products
 
-    # Standart bileşen siteleri - metin akışı ayrıştırıcısı
+    # Standart metin akışı ayrıştırıcısı
     link_queue = []
     for a in soup.find_all("a"):
         href = a.get("href", "")
@@ -212,51 +203,25 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
     return results
 
-
-def get_driver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
-
-    binary_candidates = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
-    for path in binary_candidates:
-        if os.path.exists(path):
-            options.binary_location = path
-            break
-
-    try:
-        service = Service("/usr/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {"source": 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'},
-    )
+def get_uc_driver():
+    options = uc.ChromeOptions()
+    options.headless = True # Hata ayıklarken burayı False yapıp tarayıcıyı görebilirsin
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    
+    # undetected-chromedriver, anti-bot ayarlarını kendi otomatik yapar.
+    driver = uc.Chrome(options=options, use_subprocess=True)
     return driver
 
-
-def scrape_site(site: str, url_tmpl: str, query: str):
+def scrape_site_uc(site: str, url_tmpl: str, query: str):
     encoded_query = urllib.parse.quote_plus(query)
     url = url_tmpl.format(query=encoded_query)
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
 
     driver = None
     try:
-        driver = get_driver()
-        driver.set_page_load_timeout(25)
+        driver = get_uc_driver()
+        driver.set_page_load_timeout(30)
         driver.get(url)
 
         selector = SITE_WAIT_SELECTORS.get(site)
@@ -268,25 +233,17 @@ def scrape_site(site: str, url_tmpl: str, query: str):
         else:
             time.sleep(3.0)
 
+        # Sayfayı yavaşça aşağı kaydır (Tembel yüklenen ürünler için)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-        time.sleep(1.0)
+        time.sleep(1.5)
 
         html = driver.page_source
         products = extract_products(html, base_url, site, query)
 
-        debug_png = None
-        debug_html_snippet = None
-        if not products:
-            try:
-                debug_png = driver.get_screenshot_as_png()
-            except Exception:
-                pass
-            debug_html_snippet = html[:3000]
-
         status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
-        return site, products, status, debug_png, debug_html_snippet
+        return site, products, status
     except Exception as e:
-        return site, [], f"Bağlantı Hatası / Engellendi ({e.__class__.__name__})", None, None
+        return site, [], f"Bağlantı Hatası / Engellendi ({e.__class__.__name__})"
     finally:
         if driver:
             try:
@@ -294,11 +251,11 @@ def scrape_site(site: str, url_tmpl: str, query: str):
             except Exception:
                 pass
 
-
-def search_all_selenium(query: str):
+def search_all_uc(query: str):
     results = []
+    # Kendi bilgisayarının gücüne göre buradaki max_workers (aynı anda açılan sekme sayısı) değerini artırabilirsin
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
+        futures = {executor.submit(scrape_site_uc, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())
@@ -306,9 +263,9 @@ def search_all_selenium(query: str):
                 pass
     return results
 
-
+# --- Lokal Arayüz (Streamlit) ---
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-st.title("⚡ Komponent Fiyat Karşılaştırma (Stealth Selenium)")
+st.title("⚡ Komponent Fiyat Karşılaştırma (Undetected Motoru)")
 
 query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
@@ -316,23 +273,19 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
     if not query.strip():
         st.warning("Lütfen bir ürün adı girin.")
     else:
-        with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (15-30sn sürebilir)..."):
-            site_results = search_all_selenium(query)
+        with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (Lokal bağlantı, lütfen bekleyin)..."):
+            site_results = search_all_uc(query)
 
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
-            for site, prods, status, debug_png, debug_html in site_results:
+            for site, prods, status in site_results:
                 if "Hata" in status or "Engellendi" in status:
                     st.error(f"**{site}:** {status}")
                 elif "bulunamadı" in status:
                     st.warning(f"**{site}:** {status}")
-                    if debug_png:
-                        st.image(debug_png, caption=f"{site} - o an görünen sayfa", width=400)
-                    if debug_html:
-                        st.code(debug_html, language="html")
                 else:
                     st.success(f"**{site}:** {status}")
 
-        all_products = [p for _, prods, _, _, _ in site_results for p in prods]
+        all_products = [p for _, prods, _ in site_results for p in prods]
 
         if not all_products:
             st.error("Hiçbir sitede sonuç bulunamadı.")
