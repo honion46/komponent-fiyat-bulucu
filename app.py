@@ -38,7 +38,6 @@ def parse_price(raw: str) -> float | None:
     except ValueError:
         return None
 
-# --- HTML Metin Akışı Ayrıştırıcı (Robotistan, Motorobit, Samm Market) ---
 def extract_products(html: str, base_url: str, query: str, is_samm: bool = False) -> list[tuple[str, float | None, str]]:
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
@@ -53,7 +52,7 @@ def extract_products(html: str, base_url: str, query: str, is_samm: bool = False
         if not text or not href or text.lower() in IGNORE_LINK_TEXT or href.startswith("#") or "javascript:" in href:
             continue
         
-        # Samm Market alakasız ürün döndüğünde başlık kontrolü yap
+        # Samm Market boş aramalarda alakasız ürün döndüğünde filtrele
         if is_samm and keywords:
             if not any(k in text.lower() for k in keywords):
                 continue
@@ -102,38 +101,37 @@ def extract_products(html: str, base_url: str, query: str, is_samm: bool = False
 
     return results
 
-# --- Direnc.net Arama Metodu (T-Soft Servis & Yedek Proxy) ---
+# --- Direnc.net İçin Cloudflare Bypass (Raw HTML Proxy) ---
 async def search_direnc(client: httpx.AsyncClient, query: str) -> list[Product]:
     encoded_query = urllib.parse.quote_plus(query)
-    
-    # 1. Yöntem: Direnc.net Arama Servisi
     api_url = f"https://www.direnc.net/arama?q={encoded_query}"
-    proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(api_url)}"
+    
+    # 1. Yöntem: allorigins.win RAW köprüsü
+    proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(api_url)}"
     
     try:
-        resp = await client.get(proxy_url, timeout=12)
+        resp = await client.get(proxy_url, timeout=15)
         if resp.status_code == 200:
-            data = resp.json()
-            html_content = data.get("contents", "")
-            if html_content:
-                raw_results = extract_products(html_content, "https://www.direnc.net", query)
-                if raw_results:
-                    return [Product(site="Direnc.net", name=n, price=p, url=u) for n, p, u in raw_results]
+            raw_results = extract_products(resp.text, "https://www.direnc.net", query)
+            if raw_results:
+                return [Product(site="Direnc.net", name=n, price=p, url=u) for n, p, u in raw_results]
     except Exception:
         pass
 
-    # 2. Yöntem: Standart Doğrudan İstek
+    # 2. Yöntem: corsproxy.io yedek köprüsü
+    alt_proxy = f"https://corsproxy.io/?{urllib.parse.quote(api_url)}"
     try:
-        resp = await client.get(api_url, headers=HEADERS, timeout=8, follow_redirects=True)
+        resp = await client.get(alt_proxy, timeout=15)
         if resp.status_code == 200:
             raw_results = extract_products(resp.text, "https://www.direnc.net", query)
-            return [Product(site="Direnc.net", name=n, price=p, url=u) for n, p, u in raw_results]
+            if raw_results:
+                return [Product(site="Direnc.net", name=n, price=p, url=u) for n, p, u in raw_results]
     except Exception:
         pass
 
     return []
 
-# --- Genel Siteleri Tarama ---
+# --- Diğer Siteler ---
 async def search_standard_site(client: httpx.AsyncClient, site: str, url_tmpl: str, query: str) -> list[Product]:
     encoded_query = urllib.parse.quote_plus(query)
     url = url_tmpl.format(query=encoded_query)
@@ -162,7 +160,7 @@ async def search_all(query: str) -> list[Product]:
         
     all_results = [p for site_prods in results for p in site_prods]
     
-    # Tekrarlanan URL'leri ayıkla ve fiyata göre sırala
+    # Kopyaları temizle ve fiyat sıralaması yap
     unique_items = {}
     for p in all_results:
         if p.url not in unique_items:
@@ -176,7 +174,7 @@ async def search_all(query: str) -> list[Product]:
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
 st.title("⚡ Komponent Fiyat Karşılaştırma")
 
-query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584, lm35")
+query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, lm35")
 
 if st.button("Fiyatları Getir", type="primary", use_container_width=True):
     if not query.strip():
@@ -186,7 +184,7 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
             results = asyncio.run(search_all(query))
         
         if not results:
-            st.error("Aradığınız kriterde ürün bulunamadı.")
+            st.error("Aradığınız kriterde hiçbir sitede ürün bulunamadı.")
         else:
             data = []
             for r in results:
