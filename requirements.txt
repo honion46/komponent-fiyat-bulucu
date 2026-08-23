@@ -1,5 +1,5 @@
 streamlit
-httpx
+playwright
 beautifulsoup4
 lxml
 pandas
