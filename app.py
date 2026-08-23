@@ -16,14 +16,14 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
 }
 
-# 14 Adet Popüler Pazar Yeri ve Komponent Sitesi
+# Robocombo URL'si güncellendi
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
     "Direnc.net": "https://www.direnc.net/arama?q={query}",
     "Motorobit": "https://www.motorobit.com/arama?kelime={query}",
     "Samm Market": "https://market.samm.com/search?s={query}",
     "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
-    "Robocombo": "https://www.robocombo.com/arama?q={query}",
+    "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
     "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama?q={query}",
     "F1 Depo": "https://www.f1depo.com/arama?q={query}",
     "Özdisan": "https://www.ozdisan.com/Product/Search?searchtext={query}",
@@ -83,7 +83,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
         full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
         link_queue.append((text, full_url))
 
-    # Orijinal v2 mantığı: Metin akışından Link -> Fiyat eşleştirmesi
+    # Metin akışından Link -> Fiyat eşleştirmesi
     raw_lines = [ln.strip() for ln in soup.get_text(separator="\n").split("\n") if ln.strip()]
     lines = []
     i = 0
@@ -122,7 +122,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
         if candidate_name:
             gap_counter += 1
-            if gap_counter > 10:  # Pazar yerleri için boşluk toleransı biraz artırıldı
+            if gap_counter > 10:
                 candidate_name = None
                 candidate_url = None
 
@@ -133,7 +133,7 @@ async def search_site(client: httpx.AsyncClient, site: str, url_template: str, q
     url = url_template.format(query=encoded_query)
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
     
-    # Bazı siteler için (Örn: Direnc.net) ücretsiz köprü kullanımı
+    # Direnc.net için ücretsiz köprü kullanımı
     if site == "Direnc.net":
         fetch_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}"
     else:
@@ -141,7 +141,6 @@ async def search_site(client: httpx.AsyncClient, site: str, url_template: str, q
 
     try:
         resp = await client.get(fetch_url, headers=HEADERS, timeout=15, follow_redirects=True)
-        # Hepsiburada / Amazon gibi siteler 403 veya 503 döndürebilir
         if resp.status_code != 200:
             return site, [], f"Sunucu Engeli (HTTP {resp.status_code})"
     except Exception as e:
