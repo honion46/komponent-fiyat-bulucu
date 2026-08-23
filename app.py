@@ -56,39 +56,113 @@ def parse_price(raw: str) -> float | None:
 
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
+    keywords = [k.lower() for k in query.split() if len(k) > 1]
+    
+    # ---------------------------------------------------------
+    # ÖZEL PAZAR YERİ AYRIŞTIRICILARI (Hatalı Fiyatları Engeller)
+    # ---------------------------------------------------------
+    
+    # Hepsiburada İçin CSS Seçici
+    if site_name == "Hepsiburada":
+        products = []
+        # HB ürün kartlarını yakala
+        cards = soup.select('li[id^="i"]')
+        for card in cards:
+            name_tag = card.select_one('h3[data-test-id="product-card-name"]')
+            price_tag = card.select_one('div[data-test-id="price-current-price"]')
+            link_tag = card.find('a', href=True)
+            
+            if name_tag and price_tag and link_tag:
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
+                    
+                price_text = price_tag.get_text(strip=True).replace("TL", "").strip()
+                price = parse_price(price_text)
+                
+                href = link_tag['href']
+                full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
+                products.append(Product(site=site_name, name=name, price=price, url=full_url))
+        return products
+
+    # Trendyol İçin CSS Seçici
+    elif site_name == "Trendyol":
+        products = []
+        cards = soup.select('.p-card-wrppr')
+        for card in cards:
+            name_tag = card.select_one('.prdct-desc-cntnr-name')
+            price_tag = card.select_one('.prc-box-dscntd')
+            link_tag = card.find('a', href=True)
+            
+            if name_tag and price_tag and link_tag:
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
+                    
+                price_text = price_tag.get_text(strip=True).replace("TL", "").strip()
+                price = parse_price(price_text)
+                
+                href = link_tag['href']
+                full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
+                products.append(Product(site=site_name, name=name, price=price, url=full_url))
+        return products
+        
+    # N11 İçin CSS Seçici
+    elif site_name == "N11":
+        products = []
+        cards = soup.select('.column')
+        for card in cards:
+            name_tag = card.select_one('h3.productName')
+            price_tag = card.select_one('ins') or card.select_one('.newPrice')
+            link_tag = card.find('a', href=True)
+            
+            if name_tag and price_tag and link_tag:
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
+                    
+                price_text = price_tag.get_text(strip=True).replace("TL", "").strip()
+                price = parse_price(price_text)
+                
+                href = link_tag['href']
+                full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
+                products.append(Product(site=site_name, name=name, price=price, url=full_url))
+        return products
+
+    # Amazon TR İçin CSS Seçici
+    elif site_name == "Amazon TR":
+        products = []
+        cards = soup.select('div[data-component-type="s-search-result"]')
+        for card in cards:
+            name_tag = card.select_one('h2 a span')
+            price_tag = card.select_one('span.a-price-whole')
+            price_fraction = card.select_one('span.a-price-fraction')
+            link_tag = card.select_one('h2 a')
+            
+            if name_tag and price_tag and link_tag:
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
+                    
+                # Amazon'da fiyat 100 ve küsuratı ,50 gibi ayrı etiketlerde gelir
+                p_text = price_tag.get_text(strip=True)
+                if price_fraction:
+                    p_text += "," + price_fraction.get_text(strip=True)
+                
+                price = parse_price(p_text)
+                href = link_tag['href']
+                full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
+                products.append(Product(site=site_name, name=name, price=price, url=full_url))
+        return products
+
+    # ---------------------------------------------------------
+    # STANDART KOMPONENT SİTELERİ İÇİN METİN AKIŞI AYRIŞTIRICISI
+    # ---------------------------------------------------------
     
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
         tag.decompose()
 
     link_queue = []
-    keywords = [k.lower() for k in query.split() if len(k) > 1]
-
-    if site_name == "Hepsiburada":
-        items = soup.select('li[id^="i"]')
-        for item in items:
-            name_tag = item.select_one('h3[data-test-id="product-card-name"]')
-            price_tag = item.select_one('div[data-test-id="price-current-price"]')
-            link_tag = item.find('a', href=True)
-            
-            if name_tag and link_tag:
-                name = name_tag.get_text(strip=True)
-                href = link_tag.get('href', "")
-                full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
-                
-                if keywords and not any(k in name.lower() for k in keywords):
-                    continue
-
-                price = None
-                if price_tag:
-                    p_text = price_tag.get_text(strip=True).replace("TL", "").strip()
-                    price = parse_price(p_text)
-
-                if name and full_url:
-                    link_queue.append(Product(site=site_name, name=name, price=price, url=full_url))
-        
-        if link_queue:
-            return link_queue
-
     for a in soup.find_all("a"):
         text = a.get_text(strip=True)
         href = a.get("href", "")
@@ -147,13 +221,12 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
 def get_driver():
     options = Options()
-    options.add_argument('--headless=new') # Yeni ve daha gizli headless modu
+    options.add_argument('--headless=new')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
     
-    # --- ANTI-BOT GİZLENME PARAMETRELERİ ---
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
@@ -169,7 +242,6 @@ def get_driver():
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         
-    # Tarayıcı içindeki 'Ben bir Selenium botuyum' bayrağını JavaScript ile kaldırıyoruz
     driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
         'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
     })
@@ -187,11 +259,11 @@ def scrape_site(site: str, url_tmpl: str, query: str):
         driver.set_page_load_timeout(20) 
         driver.get(url)
         
-        # Cloudflare veya dinamik JS kullanan siteler için bekleme süresini ayarlıyoruz
         if site in ["Direnc.net", "Samm Market", "Motorobit"]:
-            time.sleep(5.0) # Cloudflare testinin arka planda bitmesi için daha uzun süre
+            time.sleep(5.0)
         elif site in ["Hepsiburada", "Trendyol", "N11", "Amazon TR"]:
-            time.sleep(3.0)
+            # Javascript renderının ve fiyat etiketlerinin tam yüklenmesi için 4 saniye
+            time.sleep(4.0)
         else:
             time.sleep(1.5)
             
@@ -208,7 +280,6 @@ def scrape_site(site: str, url_tmpl: str, query: str):
 
 def search_all_selenium(query: str):
     results = []
-    # Aynı anda en fazla 4 siteye gir
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
         for future in concurrent.futures.as_completed(futures):
