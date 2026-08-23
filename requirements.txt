@@ -1,6 +1,6 @@
 streamlit
-undetected-chromedriver
+selenium
+webdriver-manager
 beautifulsoup4
 lxml
 pandas
-setuptools
