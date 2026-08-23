@@ -1,20 +1,16 @@
-import asyncio
+import concurrent.futures
 import re
 import urllib.parse
 from dataclasses import dataclass
 from bs4 import BeautifulSoup
 import pandas as pd
 import streamlit as st
-import os
+import time
 
-# Streamlit Cloud üzerinde ilk çalışmada Playwright tarayıcısını otomatik kurmak için
-@st.cache_resource
-def install_playwright():
-    os.system("playwright install chromium")
-
-install_playwright()
-
-from playwright.async_api import async_playwright
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 # 14 Adet Popüler Site
 SEARCH_URL_TEMPLATES = {
@@ -123,53 +119,69 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
     return results
 
-async def search_all_playwright(query: str):
-    async with async_playwright() as p:
-        # Gerçek bir Chrome tarayıcı başlatıyoruz (arkaplanda gizli)
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+def get_driver():
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+    
+    # Hızlı yüklenmesi için resimleri engelle
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    options.add_experimental_option("prefs", prefs)
+    
+    try:
+        # Önce Streamlit Cloud'un dahili Chromium'unu dene
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+    except:
+        # Çalışmazsa veya kendi bilgisayarındaysan otomatik indirip kur
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         
-        # Tarayıcı kimliğini (User-Agent) gerçek bir Windows bilgisayar gibi ayarlıyoruz
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080}
-        )
-        
-        # Aynı anda en fazla 4 siteye girmesi için sınırlandırıcı (RAM çökmesini engeller)
-        semaphore = asyncio.Semaphore(4)
-        
-        async def scrape_site(site, url_tmpl):
-            async with semaphore:
-                encoded_query = urllib.parse.quote_plus(query)
-                url = url_tmpl.format(query=encoded_query)
-                base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
-                
-                page = await context.new_page()
-                try:
-                    # Sayfanın ana yapısı yüklenene kadar bekle (maks 15 saniye)
-                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                    
-                    # Sayfa içindeki dinamik JS'lerin ve fiyatların yüklenmesi için 1.5 saniye ekstra bekle
-                    await page.wait_for_timeout(1500)
-                    
-                    # Render edilmiş sayfanın son halini al
-                    html = await page.content()
-                    
-                    products = extract_products(html, base_url, site, query)
-                    status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
-                    return site, products, status
-                except Exception as e:
-                    return site, [], "Hata/Zaman Aşımı"
-                finally:
-                    await page.close()
+    return driver
 
-        tasks = [scrape_site(site, tmpl) for site, tmpl in SEARCH_URL_TEMPLATES.items()]
-        results = await asyncio.gather(*tasks)
-        await browser.close()
-        return results
+def scrape_site(site: str, url_tmpl: str, query: str):
+    encoded_query = urllib.parse.quote_plus(query)
+    url = url_tmpl.format(query=encoded_query)
+    base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
+    
+    driver = None
+    try:
+        driver = get_driver()
+        driver.set_page_load_timeout(15)  # 15 saniyede yüklenmezse iptal et
+        driver.get(url)
+        
+        # Dinamik içeriklerin yüklenmesi için bekle
+        time.sleep(1.5)
+        html = driver.page_source
+        
+        products = extract_products(html, base_url, site, query)
+        status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
+        return site, products, status
+    except Exception as e:
+        return site, [], "Bağlantı Hatası / Engellendi"
+    finally:
+        if driver:
+            driver.quit()
+
+def search_all_selenium(query: str):
+    results = []
+    # Aynı anda en fazla 4 siteye gir (Sunucu çökmesini önler)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception:
+                pass
+    return results
 
 # --- Mobil Web UI (Streamlit) ---
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-st.title("⚡ Komponent Fiyat Karşılaştırma (Playwright Motoru)")
+st.title("⚡ Komponent Fiyat Karşılaştırma (Selenium Motoru)")
 
 query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
@@ -177,12 +189,12 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
     if not query.strip():
         st.warning("Lütfen bir ürün adı girin.")
     else:
-        with st.spinner(f"Tarayıcı simülasyonu başlatıldı. {len(SEARCH_URL_TEMPLATES)} site taranıyor (Yaklaşık 10-15sn)..."):
-            site_results = asyncio.run(search_all_playwright(query))
+        with st.spinner(f"Tarayıcılar başlatıldı. {len(SEARCH_URL_TEMPLATES)} site aranıyor (Lütfen 15-20sn bekleyin)..."):
+            site_results = search_all_selenium(query)
         
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
             for site, prods, status in site_results:
-                if "Hata" in status or "Aşımı" in status:
+                if "Hata" in status or "Engellendi" in status:
                     st.error(f"**{site}:** {status}")
                 elif "bulunamadı" in status:
                     st.warning(f"**{site}:** {status}")
@@ -194,7 +206,6 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
         if not all_products:
             st.error("Hiçbir sitede sonuç bulunamadı.")
         else:
-            # Fiyata göre sıralama
             all_products.sort(key=lambda p: (p.price is None, p.price or 0))
             
             data = []
