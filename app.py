@@ -2,12 +2,21 @@ import asyncio
 import re
 import urllib.parse
 from dataclasses import dataclass
-from curl_cffi.requests import AsyncSession
+import httpx
 from bs4 import BeautifulSoup
 import pandas as pd
 import streamlit as st
 
-# Arama Şablonları (Direnc.net için Cloudflare Proxy eklendi)
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+}
+
+# Doğrulanmış Arama URL Şablonları
 SEARCH_CONFIGS = {
     "Robotistan": {
         "url": "https://www.robotistan.com/arama?q={query}",
@@ -19,7 +28,7 @@ SEARCH_CONFIGS = {
     },
     "Direnc.net": {
         "url": "https://www.direnc.net/arama?q={query}",
-        "use_proxy": True,  # Datacenter 403 engelini aşmak için proxy üzerinden çeker
+        "use_proxy": True,  # 403 engelini aşmak için proxy tünelinden geçer
     },
     "Samm Market": {
         "url": "https://market.samm.com/search?s={query}",
@@ -52,10 +61,9 @@ def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
     results = []
     seen_urls = set()
 
-    # Ürün kartı seçicileri
     cards = soup.select(
         ".productItem, .showcase, .product-card, .product-item, .item-grid, "
-        ".productBox, .product-detail-card, .catalog-item, div[data-product-id], .product-layout"
+        ".productBox, .product-detail-card, .catalog-item, div[data-product-id], .product-layout, .product-box"
     )
 
     for card in cards:
@@ -80,7 +88,7 @@ def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
         results.append(Product(site=site_name, name=name, price=price, url=full_url))
         seen_urls.add(full_url)
 
-    # Yedek metin taraması (Eğer özel kart yakalanamadıysa)
+    # Yedek metin eşleşmesi
     if not results:
         for a in soup.find_all("a", href=True):
             name = a.get_text(strip=True)
@@ -104,31 +112,31 @@ def extract_products(html: str, base_url: str, site_name: str) -> list[Product]:
 
     return results
 
-async def search_site(session: AsyncSession, site: str, config: dict, query: str) -> tuple[str, list[Product], str]:
+async def search_site(client: httpx.AsyncClient, site: str, config: dict, query: str) -> tuple[str, list[Product], str]:
     encoded_query = urllib.parse.quote_plus(query)
     target_url = config["url"].format(query=encoded_query)
     base_url = "https://" + target_url.split("://", 1)[1].split("/", 1)[0]
     
-    # Cloudflare 403 veren siteleri proxy üzerinden geçir
+    # Cloudflare 403 engelini aşan genel proxy tüneli
     if config.get("use_proxy"):
         fetch_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}"
     else:
         fetch_url = target_url
 
     try:
-        resp = await session.get(fetch_url, timeout=20, follow_redirects=True)
+        resp = await client.get(fetch_url, headers=HEADERS, timeout=18, follow_redirects=True)
         if resp.status_code != 200:
             return site, [], f"Hata: HTTP {resp.status_code}"
     except Exception as e:
-        return site, [], f"Bağlantı hatası: {str(e)[:30]}"
+        return site, [], f"Bağlantı hatası: {str(e)[:25]}"
         
     products = extract_products(resp.text, base_url, site)
     status_msg = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
     return site, products, status_msg
 
 async def search_all(query: str):
-    async with AsyncSession(impersonate="chrome124") as session:
-        tasks = [search_site(session, site, cfg, query) for site, cfg in SEARCH_CONFIGS.items()]
+    async with httpx.AsyncClient() as client:
+        tasks = [search_site(client, site, cfg, query) for site, cfg in SEARCH_CONFIGS.items()]
         return await asyncio.gather(*tasks)
 
 # --- Mobil Web UI (Streamlit) ---
