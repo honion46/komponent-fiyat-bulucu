@@ -68,10 +68,20 @@ def parse_price(raw: str) -> float | None:
     except ValueError:
         return None
 
+def clean_text(text: str) -> str:
+    """Metindeki gereksiz boşlukları temizler ve upuzun kod yığınlarını engeller."""
+    cleaned = re.sub(r'\s+', ' ', text).strip()
+    if len(cleaned) > 130:
+        cleaned = cleaned[:127] + "..."
+    return cleaned
 
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
+    
+    # JSON, SVG, Template gibi gizli kodları sayfadan söküp at (Tablonun bozulmasını önler)
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside", "template", "meta", "svg", "path"]):
+        tag.decompose()
 
     if site_name == "Hepsiburada":
         products = []
@@ -80,7 +90,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_tag = card.select_one('div[data-test-id="price-current-price"]')
             link_tag = card.find("a", href=True)
             if name_tag and price_tag and link_tag:
-                name = name_tag.get_text(strip=True)
+                name = clean_text(name_tag.get("title", "") or name_tag.get_text(strip=True))
                 if keywords and not any(k in name.lower() for k in keywords):
                     continue
                 price = parse_price(price_tag.get_text(strip=True).replace("TL", "").strip())
@@ -96,7 +106,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_tag = card.select_one(".prc-box-dscntd") or card.select_one(".prc-box-sllng")
             link_tag = card.find("a", href=True)
             if name_tag and price_tag and link_tag:
-                name = name_tag.get_text(strip=True)
+                name = clean_text(name_tag.get("title", "") or name_tag.get_text(strip=True))
                 if keywords and not any(k in name.lower() for k in keywords):
                     continue
                 price = parse_price(price_tag.get_text(strip=True).replace("TL", "").strip())
@@ -112,7 +122,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_tag = card.select_one("ins") or card.select_one(".newPrice")
             link_tag = card.find("a", href=True)
             if name_tag and price_tag and link_tag:
-                name = name_tag.get_text(strip=True)
+                name = clean_text(name_tag.get("title", "") or name_tag.get_text(strip=True))
                 if keywords and not any(k in name.lower() for k in keywords):
                     continue
                 price = parse_price(price_tag.get_text(strip=True).replace("TL", "").strip())
@@ -129,7 +139,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_fraction = card.select_one("span.a-price-fraction")
             link_tag = card.select_one("h2 a")
             if name_tag and price_tag and link_tag:
-                name = name_tag.get_text(strip=True)
+                name = clean_text(name_tag.get_text(strip=True))
                 if keywords and not any(k in name.lower() for k in keywords):
                     continue
                 p_text = price_tag.get_text(strip=True)
@@ -142,13 +152,15 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
         return products
 
     # Standart bileşen siteleri - metin akışı ayrıştırıcısı
-    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
-        tag.decompose()
-
     link_queue = []
     for a in soup.find_all("a"):
-        text = a.get_text(strip=True)
         href = a.get("href", "")
+        raw_text = a.get("title", "")
+        if len(raw_text) < 3:
+            raw_text = a.get_text(separator=" ", strip=True)
+            
+        text = clean_text(raw_text)
+        
         if not text or not href or text.lower() in IGNORE_LINK_TEXT or href.startswith("#") or "javascript:" in href:
             continue
         if keywords and not any(k in text.lower() for k in keywords):
@@ -165,7 +177,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             lines.append(f"{cur} TL")
             i += 2
         else:
-            lines.append(cur)
+            lines.append(clean_text(cur))
             i += 1
 
     results = []
