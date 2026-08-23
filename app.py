@@ -30,7 +30,7 @@ SEARCH_URL_TEMPLATES = {
     "Amazon TR": "https://www.amazon.com.tr/s?k={query}",
 }
 
-PRICE_RE = re.compile(r"([\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)", re.IGNORECASE)
+PRICE_RE = re.compile(r"([\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺|TRY)", re.IGNORECASE)
 NUM_ONLY_RE = re.compile(r"^[\d.,]+$")
 
 IGNORE_LINK_TEXT = {
@@ -63,6 +63,32 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
     link_queue = []
     keywords = [k.lower() for k in query.split() if len(k) > 1]
 
+    if site_name == "Hepsiburada":
+        items = soup.select('li[id^="i"]')
+        for item in items:
+            name_tag = item.select_one('h3[data-test-id="product-card-name"]')
+            price_tag = item.select_one('div[data-test-id="price-current-price"]')
+            link_tag = item.find('a', href=True)
+            
+            if name_tag and link_tag:
+                name = name_tag.get_text(strip=True)
+                href = link_tag.get('href', "")
+                full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
+                
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
+
+                price = None
+                if price_tag:
+                    p_text = price_tag.get_text(strip=True).replace("TL", "").strip()
+                    price = parse_price(p_text)
+
+                if name and full_url:
+                    link_queue.append(Product(site=site_name, name=name, price=price, url=full_url))
+        
+        if link_queue:
+            return link_queue
+
     for a in soup.find_all("a"):
         text = a.get_text(strip=True)
         href = a.get("href", "")
@@ -80,7 +106,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
     i = 0
     while i < len(raw_lines):
         cur = raw_lines[i]
-        if i + 1 < len(raw_lines) and NUM_ONLY_RE.match(cur) and raw_lines[i + 1].strip().upper() in ("TL", "₺"):
+        if i + 1 < len(raw_lines) and NUM_ONLY_RE.match(cur) and raw_lines[i + 1].strip().upper() in ("TL", "₺", "TRY"):
             lines.append(f"{cur} TL")
             i += 2
         else:
@@ -113,7 +139,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
         if candidate_name:
             gap_counter += 1
-            if gap_counter > 10:
+            if gap_counter > 15:
                 candidate_name = None
                 candidate_url = None
 
@@ -121,26 +147,33 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
 def get_driver():
     options = Options()
-    options.add_argument('--headless')
+    options.add_argument('--headless=new') # Yeni ve daha gizli headless modu
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
+    
+    # --- ANTI-BOT GİZLENME PARAMETRELERİ ---
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
     
-    # Hızlı yüklenmesi için resimleri engelle
     prefs = {"profile.managed_default_content_settings.images": 2}
     options.add_experimental_option("prefs", prefs)
     
     try:
-        # Önce Streamlit Cloud'un dahili Chromium'unu dene
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
     except:
-        # Çalışmazsa veya kendi bilgisayarındaysan otomatik indirip kur
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         
+    # Tarayıcı içindeki 'Ben bir Selenium botuyum' bayrağını JavaScript ile kaldırıyoruz
+    driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+        'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+    })
+    
     return driver
 
 def scrape_site(site: str, url_tmpl: str, query: str):
@@ -151,11 +184,17 @@ def scrape_site(site: str, url_tmpl: str, query: str):
     driver = None
     try:
         driver = get_driver()
-        driver.set_page_load_timeout(15)  # 15 saniyede yüklenmezse iptal et
+        driver.set_page_load_timeout(20) 
         driver.get(url)
         
-        # Dinamik içeriklerin yüklenmesi için bekle
-        time.sleep(1.5)
+        # Cloudflare veya dinamik JS kullanan siteler için bekleme süresini ayarlıyoruz
+        if site in ["Direnc.net", "Samm Market", "Motorobit"]:
+            time.sleep(5.0) # Cloudflare testinin arka planda bitmesi için daha uzun süre
+        elif site in ["Hepsiburada", "Trendyol", "N11", "Amazon TR"]:
+            time.sleep(3.0)
+        else:
+            time.sleep(1.5)
+            
         html = driver.page_source
         
         products = extract_products(html, base_url, site, query)
@@ -169,7 +208,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
 
 def search_all_selenium(query: str):
     results = []
-    # Aynı anda en fazla 4 siteye gir (Sunucu çökmesini önler)
+    # Aynı anda en fazla 4 siteye gir
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
         for future in concurrent.futures.as_completed(futures):
@@ -181,7 +220,7 @@ def search_all_selenium(query: str):
 
 # --- Mobil Web UI (Streamlit) ---
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-st.title("⚡ Komponent Fiyat Karşılaştırma (Selenium Motoru)")
+st.title("⚡ Komponent Fiyat Karşılaştırma (Stealth Selenium)")
 
 query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
@@ -189,7 +228,7 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
     if not query.strip():
         st.warning("Lütfen bir ürün adı girin.")
     else:
-        with st.spinner(f"Tarayıcılar başlatıldı. {len(SEARCH_URL_TEMPLATES)} site aranıyor (Lütfen 15-20sn bekleyin)..."):
+        with st.spinner(f"Tarayıcılar gizli modda başlatıldı. {len(SEARCH_URL_TEMPLATES)} site aranıyor (Lütfen 15-20sn bekleyin)..."):
             site_results = search_all_selenium(query)
         
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
