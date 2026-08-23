@@ -1,8 +1,33 @@
+import sys
+import types
+
+# --- PYTHON 3.12+ İÇİN DISTUTILS YAMASI ---
+# undetected-chromedriver'ın eski distutils paketini arayıp çökmesini engeller.
+if "distutils" not in sys.modules:
+    distutils = types.ModuleType("distutils")
+    sys.modules["distutils"] = distutils
+    distutils_version = types.ModuleType("distutils.version")
+    sys.modules["distutils.version"] = distutils_version
+    
+    class LooseVersion:
+        def __init__(self, v):
+            self.v = str(v)
+        def __lt__(self, other): return self.v < str(other.v if hasattr(other, 'v') else other)
+        def __le__(self, other): return self.v <= str(other.v if hasattr(other, 'v') else other)
+        def __eq__(self, other): return self.v == str(other.v if hasattr(other, 'v') else other)
+        def __ge__(self, other): return self.v >= str(other.v if hasattr(other, 'v') else other)
+        def __gt__(self, other): return self.v > str(other.v if hasattr(other, 'v') else other)
+        def __str__(self): return self.v
+        
+    distutils_version.LooseVersion = LooseVersion
+# -------------------------------------------
+
 import concurrent.futures
+import os
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
-import time
 
 import pandas as pd
 import streamlit as st
@@ -142,7 +167,6 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
                 products.append(Product(site_name, name, price, full_url))
         return products
 
-    # Standart metin akışı ayrıştırıcısı
     link_queue = []
     for a in soup.find_all("a"):
         href = a.get("href", "")
@@ -205,11 +229,10 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
 def get_uc_driver():
     options = uc.ChromeOptions()
-    options.headless = True # Hata ayıklarken burayı False yapıp tarayıcıyı görebilirsin
+    options.headless = True 
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     
-    # undetected-chromedriver, anti-bot ayarlarını kendi otomatik yapar.
     driver = uc.Chrome(options=options, use_subprocess=True)
     return driver
 
@@ -231,11 +254,10 @@ def scrape_site_uc(site: str, url_tmpl: str, query: str):
             except Exception:
                 pass
         else:
-            time.sleep(3.0)
+            time.sleep(4.0)
 
-        # Sayfayı yavaşça aşağı kaydır (Tembel yüklenen ürünler için)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-        time.sleep(1.5)
+        time.sleep(2.0)
 
         html = driver.page_source
         products = extract_products(html, base_url, site, query)
@@ -253,7 +275,6 @@ def scrape_site_uc(site: str, url_tmpl: str, query: str):
 
 def search_all_uc(query: str):
     results = []
-    # Kendi bilgisayarının gücüne göre buradaki max_workers (aynı anda açılan sekme sayısı) değerini artırabilirsin
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(scrape_site_uc, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
         for future in concurrent.futures.as_completed(futures):
@@ -263,7 +284,6 @@ def search_all_uc(query: str):
                 pass
     return results
 
-# --- Lokal Arayüz (Streamlit) ---
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
 st.title("⚡ Komponent Fiyat Karşılaştırma (Undetected Motoru)")
 
@@ -273,7 +293,7 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
     if not query.strip():
         st.warning("Lütfen bir ürün adı girin.")
     else:
-        with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (Lokal bağlantı, lütfen bekleyin)..."):
+        with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (Lütfen bekleyin)..."):
             site_results = search_all_uc(query)
 
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
