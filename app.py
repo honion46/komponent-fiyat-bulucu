@@ -262,20 +262,19 @@ def scrape_site(site: str, url_tmpl: str, query: str):
         html = driver.page_source
         products = extract_products(html, base_url, site, query)
 
+        debug_png = None
+        debug_html_snippet = None
         if not products:
-            os.makedirs(DEBUG_DIR, exist_ok=True)
-            safe_name = site.replace(" ", "_").replace(".", "")
-            with open(f"{DEBUG_DIR}/{safe_name}.html", "w", encoding="utf-8") as f:
-                f.write(html)
             try:
-                driver.save_screenshot(f"{DEBUG_DIR}/{safe_name}.png")
+                debug_png = driver.get_screenshot_as_png()
             except Exception:
                 pass
+            debug_html_snippet = html[:3000]
 
         status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
-        return site, products, status
+        return site, products, status, debug_png, debug_html_snippet
     except Exception as e:
-        return site, [], f"Bağlantı Hatası / Engellendi ({e.__class__.__name__})"
+        return site, [], f"Bağlantı Hatası / Engellendi ({e.__class__.__name__})", None, None
     finally:
         if driver:
             try:
@@ -309,15 +308,19 @@ if st.button("Fiyatları Getir", type="primary", use_container_width=True):
             site_results = search_all_selenium(query)
 
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
-            for site, prods, status in site_results:
+            for site, prods, status, debug_png, debug_html in site_results:
                 if "Hata" in status or "Engellendi" in status:
                     st.error(f"**{site}:** {status}")
                 elif "bulunamadı" in status:
                     st.warning(f"**{site}:** {status}")
+                    if debug_png:
+                        st.image(debug_png, caption=f"{site} - o an görünen sayfa", width=400)
+                    if debug_html:
+                        st.code(debug_html, language="html")
                 else:
                     st.success(f"**{site}:** {status}")
 
-        all_products = [p for _, prods, _ in site_results for p in prods]
+        all_products = [p for _, prods, _, _, _ in site_results for p in prods]
 
         if not all_products:
             st.error("Hiçbir sitede sonuç bulunamadı.")
