@@ -6,6 +6,7 @@ import os
 import re
 import time
 import urllib.parse
+import concurrent.futures as cf
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
@@ -367,6 +368,32 @@ PARSERS: Dict[str, Any] = {
     "Samm Market": parse_generic,
 }
 
+# --- Direct URL fetch + parse helper ---
+def fetch_and_parse_direct_url(url: str, site_name: str, relevance_threshold: float = 0.4, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None) -> Tuple[List[Product], Optional[str]]:
+    """
+    Doğrudan kullanıcı bir ürün URL'si verdiğinde bu fonksiyon kullanılır.
+    """
+    parsed = urllib.parse.urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    # İlk önce requests ile dene
+    html, err = fetch_page_requests(url, timeout=12)
+    png_path = None
+    if not html:
+        # Selenium fallback
+        wait_selector = SITE_WAIT_SELECTORS.get(site_name)
+        html, png, serr = fetch_page_selenium(url, wait_selector=wait_selector, wait_for_content=(wait_selector is None), timeout=25, headless=not debug, chrome_binary=chrome_binary, driver_path=driver_path)
+        if debug:
+            hpath, ppath = save_debug(site_name, html, png)
+            png_path = ppath
+        if serr and not html:
+            return [], f"Fetch Hatası: {serr}"
+    try:
+        parser = PARSERS.get(site_name, parse_generic)
+        products = parser(html, base_url, site_name, query="", relevance_threshold=relevance_threshold)
+        return products, None
+    except Exception as e:
+        return [], f"Ayrıştırma Hatası: {e}"
+
 # --- Orchestration ---
 def scrape_site(site: str, template: str, query: str, relevance_threshold: float = 0.4, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None) -> Tuple[str, List[Product], str, Optional[str]]:
     url = template.format(query=urllib.parse.quote_plus(query))
@@ -399,15 +426,16 @@ def scrape_site(site: str, template: str, query: str, relevance_threshold: float
 
 def search_all(query: str, sites: List[str], max_workers: int = 3, relevance_threshold: float = 0.4, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None):
     results = []
-    with __import__("concurrent.futures").ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(scrape_site, site, SEARCH_SITES[site], query, relevance_threshold, debug, chrome_binary, driver_path): site
             for site in sites if site in SEARCH_SITES
         }
-        for fut in __import__("concurrent.futures").as_completed(futures):
+        for fut in cf.as_completed(futures):
             try:
                 results.append(fut.result())
             except Exception:
+                # log istersen ekle
                 pass
     return results
 
@@ -430,61 +458,5 @@ if st.button("Ara"):
     if not query or not query.strip():
         st.warning("Lütfen bir arama terimi girin.")
     else:
-        q = query.strip()
-        # Eğer kullanıcı doğrudan ürün URL'si verdi ise site'yi tespit et ve doğrudan çek
-        direct_site = None
-        parsed_q = urllib.parse.urlparse(q)
-        if parsed_q.scheme and parsed_q.netloc:
-            # domain'den site belirle
-            domain = parsed_q.netloc.lower()
-            for s, tmpl in SEARCH_SITES.items():
-                if urllib.parse.urlparse(tmpl.format(query="x")).netloc in domain:
-                    direct_site = s
-                    break
-        results = []
-        if direct_site:
-            # doğrudan URL'yi çek ve parse et
-            st.info(f"Doğrudan URL tespiti: {direct_site}")
-            site, products, status, png = scrape_site(direct_site, SEARCH_SITES[direct_site], q, relevance_threshold=relevance, debug=debug_mode, chrome_binary=(chrome_bin or None), driver_path=(driver_path or None))
-            if status:
-                if "Hata" in status or "Engellendi" in status:
-                    st.error(f"{site}: {status}")
-            results.append((site, products, status, png))
-        else:
-            with st.spinner(f"{len(sites)} site aranıyor..."):
-                results = search_all(q, sites, max_workers=max_workers, relevance_threshold=relevance, debug=debug_mode, chrome_binary=(chrome_bin or None), driver_path=(driver_path or None))
-
-        # Sonuçları topla ve göster (yalnızca Ürün - Fiyat)
-        all_products: List[Product] = []
-        for site, prods, status, png in results:
-            if "Hata" in status:
-                st.error(f"{site}: {status}")
-            elif "bulunamadı" in status:
-                st.warning(f"{site}: {status}")
-                if debug_mode and png:
-                    st.image(png, caption=f"{site} - debug")
-            else:
-                st.success(f"{site}: {status}")
-            all_products.extend(prods)
-
-        if not all_products:
-            st.error("Hiç ürün bulunamadı. Debug modunu açıp HTML kaydını kontrol et veya alaka eşiğini düşür.")
-        else:
-            # Tekilleştir ve sırala (fiyat bilinmeyenleri sona)
-            seen = set()
-            rows = []
-            for p in all_products:
-                key = (p.name.strip().lower(), p.price)
-                if key in seen:
-                    continue
-                seen.add(key)
-                price_display = f"{p.price:,.2f} TL" if p.price is not None else "Bilinmiyor"
-                rows.append({"Ürün": p.name, "Fiyat": price_display, "Site": p.site, "Link": p.url, "price_val": (p.price if p.price is not None else float("inf"))})
-            df = pd.DataFrame(rows)
-            df = df.sort_values("price_val").drop(columns=["price_val"])
-            st.dataframe(df[["Ürün", "Fiyat", "Site", "Link"]], use_container_width=True)
-            st.markdown("### Sadece Ürün - Fiyat")
-            for _, r in df.iterrows():
-                st.write(f"- {r['Ürün']} — {r['Fiyat']} — ({r['Site']})")
-
-st.caption("Not: Selenium ile yapılan istekler bazı sitelerin kullanım şartlarını etkileyebilir. Debug açmak local'de GUI gerektirebilir.")
+        q = query.strip
+
