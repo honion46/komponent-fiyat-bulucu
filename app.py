@@ -228,6 +228,23 @@ def get_driver():
     return driver
 
 
+def wait_for_real_content(driver, timeout=15):
+    """Sayfada gerçek fiyat metni (TL/₺) görünene kadar bekler (AJAX sonuçlarının dolmasını bekler)."""
+    js_check = """
+    const t = document.body.innerText || '';
+    return /\\d[\\d.,]*\\s*(TL|₺)/.test(t);
+    """
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            if driver.execute_script(js_check):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def dismiss_cookie_banner(driver):
     """Yaygın çerez/onay bannerlarını otomatik kapatmayı dener."""
     texts = [
@@ -274,7 +291,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
             except Exception:
                 pass
         elif site in SLOW_AJAX_SITES:
-            time.sleep(7.0)
+            wait_for_real_content(driver, timeout=15)
         else:
             time.sleep(3.0)
 
