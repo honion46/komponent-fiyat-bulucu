@@ -12,14 +12,13 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
-    "Motorobit": "https://www.motorobit.com/arama?kelime={query}",
+    "Motorobit": "https://www.motorobit.com/arama?q={query}",
     "Samm Market": "https://market.samm.com/search?s={query}",
     "Robolink": "https://www.robolinkmarket.com/?search_provider=aisearch&query={query}&page=1",
     "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
@@ -29,11 +28,9 @@ SEARCH_URL_TEMPLATES = {
 }
 
 # Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
-SLOW_AJAX_SITES = {"Samm Market", "Robolink"}
+SLOW_AJAX_SITES = {"Samm Market", "Robolink", "Motorobit"}
 
 SITE_WAIT_SELECTORS = {}
-
-VUE_SEARCH_SITES = {"Motorobit"}
 
 PRICE_RE = re.compile(r"([\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺|TRY)", re.IGNORECASE)
 NUM_ONLY_RE = re.compile(r"^[\d.,]+$")
@@ -240,39 +237,20 @@ def scrape_site(site: str, url_tmpl: str, query: str):
     try:
         driver = get_driver()
         driver.set_page_load_timeout(25)
+        driver.get(url)
 
-        if site in VUE_SEARCH_SITES:
-            # Bu site Vue.js tabanlı; URL parametresi sonucu doldurmuyor.
-            # Ana sayfaya git, arama kutusuna yaz, Enter'a bas.
-            base_home = url.split("/arama")[0]
-            driver.get(base_home)
+        selector = SITE_WAIT_SELECTORS.get(site)
+        if selector:
             try:
-                search_box = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, "//input[@type='search' or contains(@placeholder,'Ara')]")
-                    )
-                )
-                search_box.clear()
-                search_box.send_keys(query)
-                search_box.send_keys(Keys.ENTER)
-                time.sleep(7.0)
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
             except Exception:
                 pass
+        elif site in SLOW_AJAX_SITES:
+            time.sleep(7.0)
         else:
-            driver.get(url)
+            time.sleep(3.0)
 
-            selector = SITE_WAIT_SELECTORS.get(site)
-            if selector:
-                try:
-                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                except Exception:
-                    pass
-            elif site in SLOW_AJAX_SITES:
-                time.sleep(7.0)
-            else:
-                time.sleep(3.0)
-
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
             time.sleep(1.0)
 
         html = driver.page_source
