@@ -251,7 +251,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
             time.sleep(3.0)
 
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-            time.sleep(1.0)
+        time.sleep(1.0)
 
         html = driver.page_source
         products = extract_products(html, base_url, site, query)
