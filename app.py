@@ -48,7 +48,7 @@ SEARCH_SITES: Dict[str, str] = {
 # Site-özel bekleyiciler (Selenium için)
 SITE_WAIT_SELECTORS: Dict[str, str] = {
     "Motorobit": ".product-card, .products, .product-list, .product",
-    "Samm Market": ".product, .product-list",
+    "Samm Market": ".product, .product-list, .product-item, .product-card",
     "Robocombo": ".product, .product-card",
 }
 
@@ -359,27 +359,145 @@ def parse_motorobit(html: str, base_url: str, site: str, query: str, relevance_t
         out.append(p)
     return out
 
+# Samm Market: token normalize + detay kontrolü ile daha hassas parser
+def _normalize_token(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def _token_score(name: str, query: str) -> float:
+    nq = [t for t in re.split(r"\s+", query.lower()) if t and len(t) > 0]
+    if not nq:
+        return 0.0
+    name_norm = _normalize_token(name)
+    match = 0
+    for qtok in nq:
+        if _normalize_token(qtok) and _normalize_token(qtok) in name_norm:
+            match += 1
+    return match / len(nq)
+
+def parse_sammmarket(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.5) -> List[Product]:
+    soup = BeautifulSoup(html, "lxml")
+    keywords = [k for k in re.split(r"\s+", query) if k and len(k) > 0]
+    candidates: List[Product] = []
+
+    # muhtemel kart seçicileri
+    card_selectors = [".product", ".product-item", ".product-card", ".prd", ".product-list li", ".search-result", ".product-grid-item"]
+    price_selectors = [".price", ".product-price", ".prd-price", ".priceLabel", ".amount", ".priceText"]
+
+    for sel in card_selectors:
+        cards = soup.select(sel)
+        if not cards:
+            continue
+        for card in cards:
+            # isim
+            name_tag = card.select_one("h2, h3, .title, .product-title, a")
+            if not name_tag:
+                continue
+            name = name_tag.get_text(" ", strip=True)
+            # link
+            a = card.find("a", href=True)
+            href = url_join(base_url, a["href"]) if a else base_url
+            # fiyat
+            price = None
+            for ps in price_selectors:
+                el = card.select_one(ps)
+                if el:
+                    m = PRICE_RE.search(el.get_text(" ", strip=True))
+                    if m:
+                        price = parse_price(m.group(1))
+                        break
+            if price is None:
+                m2 = PRICE_RE.search(card.get_text(" ", strip=True))
+                if m2:
+                    price = parse_price(m2.group(1))
+            candidates.append(Product(site=site, name=name, price=price, url=href))
+        if candidates:
+            break
+
+    # Eğer çok aday varsa, skorla sırala ve detay kontrolü yap
+    if candidates:
+        scored = []
+        for c in candidates:
+            s = _token_score(c.name, query)
+            scored.append((s, c))
+        scored.sort(key=lambda x: (-x[0], (x[1].price if x[1].price is not None else float("inf"))))
+
+        top_candidates = [c for _, c in scored[:8]]
+        final: List[Product] = []
+        for cand in top_candidates:
+            if cand.price is not None and _token_score(cand.name, query) >= relevance_threshold:
+                final.append(cand)
+                continue
+            # detay sayfasından kesin bilgi al
+            try:
+                html_detail, err = fetch_page_requests(cand.url, timeout=8)
+                if not html_detail:
+                    html_detail, png, serr = fetch_page_selenium(cand.url, wait_selector=None, wait_for_content=True, timeout=12, headless=True)
+                if html_detail:
+                    soup_d = BeautifulSoup(html_detail, "lxml")
+                    title = (soup_d.find("h1") or soup_d.find("h2"))
+                    title_text = title.get_text(" ", strip=True) if title else cand.name
+                    txt = soup_d.get_text(" ", strip=True)
+                    m_kdv = re.search(r"kdv\s*dahil.*?([\d\.,\s]+)\s*(?:TL|₺|TRY)", txt, re.IGNORECASE)
+                    price_d = None
+                    if m_kdv:
+                        price_d = parse_price(m_kdv.group(1))
+                    else:
+                        for ps in price_selectors:
+                            el = soup_d.select_one(ps)
+                            if el:
+                                mm = PRICE_RE.search(el.get_text(" ", strip=True))
+                                if mm:
+                                    price_d = parse_price(mm.group(1))
+                                    break
+                        if price_d is None:
+                            mm2 = PRICE_RE.search(txt)
+                            if mm2:
+                                price_d = parse_price(mm2.group(1))
+                    if price_d is not None:
+                        final.append(Product(site=site, name=title_text, price=price_d, url=cand.url))
+            except Exception:
+                continue
+
+        # tekilleştir ve döndür
+        seen = set()
+        out = []
+        for p in final:
+            key = (p.name.strip().lower(), p.price)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+        if out:
+            return out
+
+    # fallback: candidates içinden relevance eşiğini geçenleri al
+    out2 = [c for c in candidates if _token_score(c.name, query) >= relevance_threshold]
+    seen = set()
+    res = []
+    for p in out2:
+        key = (p.name.strip().lower(), p.price)
+        if key in seen:
+            continue
+        seen.add(key)
+        res.append(p)
+    return res
+
 # Parsers registry
 PARSERS: Dict[str, Any] = {
     "Motorobit": parse_motorobit,
-    "Robotzade": parse_generic,  # istersen site-özel ekle
+    "Robotzade": parse_generic,
     "Robocombo": parse_generic,
     "Robotistan": parse_generic,
-    "Samm Market": parse_generic,
+    "Samm Market": parse_sammmarket,
 }
 
 # --- Direct URL fetch + parse helper ---
 def fetch_and_parse_direct_url(url: str, site_name: str, relevance_threshold: float = 0.4, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None) -> Tuple[List[Product], Optional[str]]:
-    """
-    Doğrudan kullanıcı bir ürün URL'si verdiğinde bu fonksiyon kullanılır.
-    """
     parsed = urllib.parse.urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
-    # İlk önce requests ile dene
     html, err = fetch_page_requests(url, timeout=12)
     png_path = None
     if not html:
-        # Selenium fallback
         wait_selector = SITE_WAIT_SELECTORS.get(site_name)
         html, png, serr = fetch_page_selenium(url, wait_selector=wait_selector, wait_for_content=(wait_selector is None), timeout=25, headless=not debug, chrome_binary=chrome_binary, driver_path=driver_path)
         if debug:
@@ -440,7 +558,7 @@ def search_all(query: str, sites: List[str], max_workers: int = 3, relevance_thr
     return results
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="Ürün-Fiyat (Motorobit düzeltmeli)", layout="wide")
+st.set_page_config(page_title="Ürün-Fiyat (Geliştirilmiş)", layout="wide")
 st.title("Ürün ve Fiyat (sadece ürün adı ve fiyat gösterilir)")
 
 with st.sidebar:
@@ -495,7 +613,6 @@ if st.button("Ara"):
                 if debug_mode and png:
                     st.image(png, caption=f"{site} - debug")
             else:
-                # başarı durumu
                 st.info(f"{site}: {status}")
             all_products.extend(prods)
 
