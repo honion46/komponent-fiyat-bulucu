@@ -228,6 +228,30 @@ def get_driver():
     return driver
 
 
+def dismiss_cookie_banner(driver):
+    """Yaygın çerez/onay bannerlarını otomatik kapatmayı dener."""
+    texts = [
+        "kabul et", "kabul ediyorum", "onayla", "onaylıyorum", "tümünü kabul et",
+        "accept", "accept all", "i agree", "anladım", "tamam", "izin ver",
+    ]
+    js = """
+    const texts = arguments[0];
+    const nodes = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
+    for (const el of nodes) {
+        const t = (el.innerText || '').trim().toLowerCase();
+        if (t && texts.some(x => t.includes(x)) && t.length < 40) {
+            el.click();
+            return true;
+        }
+    }
+    return false;
+    """
+    try:
+        driver.execute_script(js, texts)
+    except Exception:
+        pass
+
+
 def scrape_site(site: str, url_tmpl: str, query: str):
     encoded_query = urllib.parse.quote_plus(query)
     url = url_tmpl.format(query=encoded_query)
@@ -238,6 +262,10 @@ def scrape_site(site: str, url_tmpl: str, query: str):
         driver = get_driver()
         driver.set_page_load_timeout(25)
         driver.get(url)
+
+        time.sleep(1.0)
+        dismiss_cookie_banner(driver)
+        time.sleep(0.5)
 
         selector = SITE_WAIT_SELECTORS.get(site)
         if selector:
@@ -250,6 +278,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
         else:
             time.sleep(3.0)
 
+        dismiss_cookie_banner(driver)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
         time.sleep(1.0)
 
