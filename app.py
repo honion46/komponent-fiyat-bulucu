@@ -1,5 +1,5 @@
 # app.py
-# Gereksinimler: streamlit, requests, beautifulsoup4, lxml, pandas, selenium, webdriver-manager
+# Gereksinimler:
 # pip install streamlit requests beautifulsoup4 lxml pandas selenium webdriver-manager
 
 import os
@@ -7,6 +7,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
 
 import pandas as pd
@@ -14,23 +15,50 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-# Selenium yalnızca fallback için (opsiyonel)
+# Selenium (fallback / JS-rendered sayfalar için)
 from selenium import webdriver
+from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
+# --- Konfig ---
 DEBUG_DIR = "debug_snapshots"
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-HEADERS = {"User-Agent": USER_AGENT}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+DEFAULT_HEADERS = {"User-Agent": USER_AGENT}
 
-PRICE_RE = re.compile(r"([\d]{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)", re.IGNORECASE)
+# Arama şablonları - önemli siteler
+SEARCH_SITES: Dict[str, str] = {
+    "Motorobit": "https://www.motorobit.com/arama?q={query}",
+    "Robotzade": "https://www.robotzade.com/arama/{query}",
+    "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
+    "Robotistan": "https://www.robotistan.com/arama?q={query}",
+    "Samm Market": "https://market.samm.com/search?s={query}",
+}
+
+# Site-özel bekleyiciler (Selenium için)
+SITE_WAIT_SELECTORS: Dict[str, str] = {
+    "Motorobit": ".product-card, .products, .product-list, .product",
+    "Samm Market": ".product, .product-list",
+    "Robocombo": ".product, .product-card",
+}
+
+# Fiyat regex
+PRICE_RE = re.compile(
+    r"([\d]{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)",
+    re.IGNORECASE,
+)
 _CLEAN_RE = re.compile(r"[^\d,.\-]")
 
+# --- Model ---
 @dataclass
 class Product:
     site: str
@@ -38,6 +66,7 @@ class Product:
     price: Optional[float]
     url: str
 
+# --- Yardımcılar ---
 def parse_price(raw: Optional[str]) -> Optional[float]:
     if not raw:
         return None
@@ -58,9 +87,27 @@ def parse_price(raw: Optional[str]) -> Optional[float]:
 def url_join(base: str, href: str) -> str:
     return urllib.parse.urljoin(base, href)
 
-def fetch_requests(url: str, timeout: int = 10) -> Tuple[Optional[str], Optional[str]]:
+def save_debug(site: str, html: Optional[str], png: Optional[bytes]) -> Tuple[Optional[str], Optional[str]]:
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    html_path = None
+    png_path = None
     try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        if html:
+            html_path = os.path.join(DEBUG_DIR, f"{site}_{ts}.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html)
+        if png:
+            png_path = os.path.join(DEBUG_DIR, f"{site}_{ts}.png")
+            with open(png_path, "wb") as f:
+                f.write(png)
+    except Exception:
+        pass
+    return html_path, png_path
+
+# --- Fetch: requests ve selenium fallback ---
+def fetch_page_requests(url: str, timeout: int = 10) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.text, None
     except Exception as e:
@@ -69,51 +116,118 @@ def fetch_requests(url: str, timeout: int = 10) -> Tuple[Optional[str], Optional
 def get_driver(headless: bool = True, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None):
     options = Options()
     if headless:
+        # bazı Chrome sürümlerinde "--headless=new" deneyebilirsin
         options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     options.add_argument(f'--user-agent={USER_AGENT}')
     if chrome_binary and os.path.exists(chrome_binary):
         options.binary_location = chrome_binary
+
     try:
         if driver_path and os.path.exists(driver_path):
             service = Service(driver_path)
             return webdriver.Chrome(service=service, options=options)
-        # webdriver-manager fallback
+        # yerel sürücü yoksa webdriver-manager
         service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
+        driver = webdriver.Chrome(service=service, options=options)
+        try:
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'},
+            )
+        except Exception:
+            pass
+        return driver
     except Exception as e:
-        raise RuntimeError("Chrome driver başlatılamadı: " + str(e))
+        raise RuntimeError("Chromedriver başlatılamadı: " + str(e))
 
-def fetch_selenium(url: str, wait_seconds: int = 1, headless: bool = True, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None) -> Tuple[Optional[str], Optional[bytes], Optional[str]]:
+def fetch_page_selenium(
+    url: str,
+    wait_selector: Optional[str] = None,
+    wait_for_content: bool = False,
+    timeout: int = 20,
+    headless: bool = True,
+    chrome_binary: Optional[str] = None,
+    driver_path: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[bytes], Optional[str]]:
     driver = None
     try:
         driver = get_driver(headless=headless, chrome_binary=chrome_binary, driver_path=driver_path)
-        driver.set_page_load_timeout(20)
+        driver.set_page_load_timeout(timeout)
         driver.get(url)
-        time.sleep(wait_seconds)
+        # küçük bekleme
+        time.sleep(0.7)
+        # cookie/banner kapatma denemesi
         try:
-            # basit cookie kapatma denemesi
-            driver.execute_script("""
-            try {
-              document.querySelectorAll('button, a').forEach(el => {
-                const t = (el.innerText||'').toLowerCase();
-                if (t.includes('kabul') || t.includes('accept')) { el.click(); }
-              });
-            } catch(e) {}
-            """)
+            driver.execute_script(
+                """
+                try {
+                  document.querySelectorAll('button, a, div[role="button"]').forEach(el => {
+                    const t = (el.innerText||'').toLowerCase();
+                    if (t.includes('kabul') || t.includes('accept') || t.includes('tamam')) { el.click(); }
+                  });
+                } catch(e) {}
+                """
+            )
         except Exception:
             pass
-        html = driver.page_source
-        png = None
+
+        # site-özel selector bekle
+        if wait_selector:
+            try:
+                WebDriverWait(driver, min(25, timeout)).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
+                )
+            except Exception:
+                # yinede devam et
+                pass
+        elif wait_for_content:
+            end = time.time() + timeout
+            while time.time() < end:
+                try:
+                    t = driver.execute_script("return document.body && document.body.innerText ? document.body.innerText : ''")
+                    if re.search(r"\d[\d.,\s]*\s*(TL|₺)", str(t)):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
         try:
-            png = driver.get_screenshot_as_png()
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
         except Exception:
-            png = None
-        return html, png, None
+            pass
+        time.sleep(0.7)
+        html = driver.page_source
+        screenshot = None
+        try:
+            screenshot = driver.get_screenshot_as_png()
+        except Exception:
+            screenshot = None
+
+        # Eğer screenshot küçükse, element bazlı dene (fiyat elemanı)
+        if (not screenshot) or (screenshot and len(screenshot) < 1000):
+            try:
+                price_elems = driver.find_elements(By.CSS_SELECTOR, "[class*=price], [id*=price], .price, .amount")
+                if price_elems:
+                    el = max(price_elems, key=lambda e: (e.size.get("height", 0) * e.size.get("width", 0)))
+                    try:
+                        png2 = el.screenshot_as_png
+                        if png2 and len(png2) > 500:
+                            screenshot = png2
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return html, screenshot, None
     except TimeoutException as e:
-        return None, None, f"timeout: {e}"
+        return None, None, f"Timeout: {e}"
     except WebDriverException as e:
         return None, None, str(e)
     except Exception as e:
@@ -125,71 +239,91 @@ def fetch_selenium(url: str, wait_seconds: int = 1, headless: bool = True, chrom
             except Exception:
                 pass
 
-def save_debug(site: str, html: Optional[str], png: Optional[bytes]):
-    from datetime import datetime
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    if html:
-        with open(os.path.join(DEBUG_DIR, f"{site}_{ts}.html"), "w", encoding="utf-8") as f:
-            f.write(html)
-    if png:
-        with open(os.path.join(DEBUG_DIR, f"{site}_{ts}.png"), "wb") as f:
-            f.write(png)
+# --- Parsers ---
+def parse_generic(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.4) -> List[Product]:
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
+        tag.decompose()
+    keywords = [k.lower() for k in query.split() if len(k) > 1]
+    results: List[Product] = []
+    # link tabanlı basit tarama (fallback)
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True)
+        if not text or len(text) < 3:
+            continue
+        # basit keyword kontrolü
+        if keywords and not any(k in text.lower() for k in keywords):
+            continue
+        # çevresinde fiyat ara
+        parent = a.parent
+        price = None
+        if parent:
+            m = PRICE_RE.search(parent.get_text(" ", strip=True))
+            if m:
+                price = parse_price(m.group(1))
+        if price is None:
+            m2 = PRICE_RE.search(soup.get_text(" ", strip=True))
+            if m2:
+                price = parse_price(m2.group(1))
+        if price is not None:
+            results.append(Product(site=site, name=text, price=price, url=url_join(base_url, a["href"])))
+    # dedupe
+    seen = set()
+    out = []
+    for p in results:
+        key = (p.name.strip().lower(), p.price)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
 
-# Core extraction: hedef = yalnızca ürün adı ve o ürünün fiyatı
-def extract_products_strict(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.5) -> List[Product]:
+def parse_motorobit(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.4) -> List[Product]:
     """
-    Sıkı kurallar:
-    1) Eğer sayfa ürün sayfasıysa: h1/h2/og:title/meta title al -> aynı blokta veya yakınında PRICE_RE arar.
-    2) Eğer listing (çoklu ürün) ise: ürün kartlarını tek tek kontrol eder, başlık + fiyat aynı kartta olmalı.
-    3) Başlık query ile anlamlı şekilde eşleşmeli (keyword overlap >= threshold).
+    Motorobit için site-özel parser:
+    - Ürün sayfası (h1/h2/og:title) -> aynı blokta fiyat
+    - Arama/listing sayfası -> ürün kartlarını (.product-card vb.) kontrol et
     """
     soup = BeautifulSoup(html, "lxml")
-    # Temizle
-    for tag in soup(["nav", "footer", "header", "script", "style", "aside", "noscript"]):
-        tag.decompose()
-
     keywords = [k.lower() for k in query.split() if len(k) > 1]
     results: List[Product] = []
 
-    # 1) Ürün sayfası heuristiği: h1/h2 varsa onlara yakın fiyat ara
-    title_el = soup.find(["h1", "h2"])
-    if title_el:
-        title = title_el.get_text(" ", strip=True)
-        if title:
-            # aynı parent ve sibling'larda fiyat arama
-            parent = title_el.parent
-            search_text = parent.get_text(" ", strip=True) if parent else soup.get_text(" ", strip=True)
-            # öncelikle 'KDV' içeren ifadeler
-            m_kdv = re.search(r"([\d\.,\s]+)\s*(?:TL|₺|TRY).*kdv", search_text, re.IGNORECASE)
+    # ÜRÜN SAYFASI HEURİSTİĞİ
+    title_tag = soup.find(["h1", "h2"]) or soup.find("meta", property="og:title")
+    if title_tag:
+        title = title_tag.get_text(" ", strip=True) if hasattr(title_tag, "get_text") else (title_tag.get("content") if title_tag else "")
+        if title and (not keywords or any(k in title.lower() for k in keywords)):
+            # title etrafında fiyat ara
+            parent = title_tag.parent if hasattr(title_tag, "parent") else soup
+            text_block = parent.get_text(" ", strip=True)
+            # ilk önce 'KDV' etiketli fiyat arama
+            m_kdv = re.search(r"([\d\.,\s]+)\s*(?:TL|₺|TRY).*kdv", text_block, re.IGNORECASE)
             if m_kdv:
                 price = parse_price(m_kdv.group(1))
-                if price is not None and _is_relevant(title, keywords, relevance_threshold):
+                if price is not None:
                     results.append(Product(site=site, name=title, price=price, url=base_url))
                     return results
-            # normal price search near title
-            m = PRICE_RE.search(search_text)
+            m = PRICE_RE.search(text_block)
             if m:
                 price = parse_price(m.group(1))
-                if price is not None and _is_relevant(title, keywords, relevance_threshold):
+                if price is not None:
                     results.append(Product(site=site, name=title, price=price, url=base_url))
                     return results
 
-    # 2) Kart bazlı arama: tipik "card" seçicilerini dene
-    card_selectors = [".product", ".product-card", ".product-item", ".product-list li", ".prd", ".productBox", ".search-result", ".product-grid-item"]
-    price_selectors = [".price", ".product-price", ".prd-price", ".price-new", ".prc", ".price-item", ".amount", ".priceLabel"]
+    # ARAMA / LİSTING SAYFASI - kart seçicileri
+    card_selectors = [".product-card", ".product-item", ".product", ".search-result", ".product-grid-item", ".products .item"]
+    price_selectors = [".price", ".product-price", ".prd-price", ".priceLabel", ".amount", ".priceText"]
     for sel in card_selectors:
         cards = soup.select(sel)
         if not cards:
             continue
         for card in cards:
-            # başlık bul
-            name_tag = card.select_one("h2") or card.select_one("h3") or card.select_one(".title") or card.select_one("a")
+            name_tag = card.select_one("h2, h3, .title, .product-title, a")
             if not name_tag:
                 continue
             name = name_tag.get_text(" ", strip=True)
-            if not _is_relevant(name, keywords, relevance_threshold):
+            if keywords and not any(k in name.lower() for k in keywords):
                 continue
-            # fiyat aynı kartta
             price = None
             for ps in price_selectors:
                 el = card.select_one(ps)
@@ -198,158 +332,159 @@ def extract_products_strict(html: str, base_url: str, site: str, query: str, rel
                     if m:
                         price = parse_price(m.group(1))
                         break
-            # fallback: kart metni içinde ara
             if price is None:
                 m2 = PRICE_RE.search(card.get_text(" ", strip=True))
                 if m2:
                     price = parse_price(m2.group(1))
-            if name and (price is not None):
-                # link bul
-                link_tag = card.find("a", href=True)
-                url = url_join(base_url, link_tag["href"]) if link_tag else base_url
-                results.append(Product(site=site, name=name, price=price, url=url))
+            link_tag = card.find("a", href=True)
+            href = url_join(base_url, link_tag["href"]) if link_tag else base_url
+            if price is not None:
+                results.append(Product(site=site, name=name, price=price, url=href))
         if results:
-            # eğer bu selector ile sonuç bulduysak diğer selector'leri denemeye gerek yok
             break
 
-    # 3) Eğer hala yoksa, sayfa genelinden başlık + en yakın fiyattan dene (çok sıkı filtre: başlık query ile uyuşmalı)
+    # fallback generic
     if not results:
-        # possible product titles from links but filter them
-        candidates = []
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(" ", strip=True)
-            if not text or len(text) < 3:
-                continue
-            if _looks_like_nav(text):
-                continue
-            if _is_relevant(text, keywords, relevance_threshold):
-                # fiyatı link etrafından ara: parent veya next siblings
-                parent = a.parent
-                price = None
-                if parent:
-                    m = PRICE_RE.search(parent.get_text(" ", strip=True))
-                    if m:
-                        price = parse_price(m.group(1))
-                # fallback global
-                if price is None:
-                    m2 = PRICE_RE.search(soup.get_text(" ", strip=True))
-                    if m2:
-                        price = parse_price(m2.group(1))
-                if price is not None:
-                    candidates.append((text, url_join(base_url, a["href"]), price))
-        for nm, url, price in candidates:
-            results.append(Product(site=site, name=nm, price=price, url=url))
+        results = parse_generic(html, base_url, site, query, relevance_threshold=relevance_threshold)
 
-    # dedupe by (name, price)
+    # dedupe
     seen = set()
-    unique: List[Product] = []
+    out = []
     for p in results:
         key = (p.name.strip().lower(), p.price)
         if key in seen:
             continue
         seen.add(key)
-        unique.append(p)
-    return unique
+        out.append(p)
+    return out
 
-def _is_relevant(name: str, keywords: List[str], threshold: float) -> bool:
-    if not keywords:
-        return True
-    lname = name.lower()
-    matched = sum(1 for k in keywords if k in lname)
-    return (matched / len(keywords)) >= threshold
-
-def _looks_like_nav(text: str) -> bool:
-    nav_words = {"anasayfa", "bildirim", "giriş", "kayıt", "iletişim", "yardım", "satış", "tükendi", "favori", "sepet"}
-    t = text.strip().lower()
-    return any(w in t for w in nav_words)
-
-# Basit site listesi (sadece arama URL template'leri)
-SITES: Dict[str, str] = {
-    "Robotzade": "https://www.robotzade.com/arama/{query}",
-    "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
-    "Robotistan": "https://www.robotistan.com/arama?q={query}",
-    "Samm Market": "https://market.samm.com/search?s={query}",
+# Parsers registry
+PARSERS: Dict[str, Any] = {
+    "Motorobit": parse_motorobit,
+    "Robotzade": parse_generic,  # istersen site-özel ekle
+    "Robocombo": parse_generic,
+    "Robotistan": parse_generic,
+    "Samm Market": parse_generic,
 }
 
-def scrape_site_strict(site: str, url_template: str, query: str, relevance: float = 0.6, debug: bool = False, selenium_fallback: bool = True) -> Tuple[str, List[Product], Optional[str], Optional[str]]:
-    url = url_template.format(query=urllib.parse.quote_plus(query))
-    base = urllib.parse.urlparse(url).scheme + "://" + urllib.parse.urlparse(url).netloc
-    html, err = fetch_requests(url, timeout=10)
-    png_path = None
-    if not html and selenium_fallback:
-        try:
-            html, png, serr = fetch_selenium(url, wait_seconds=1, headless=not debug)
-            if debug:
-                # kaydet
-                if html or png:
-                    from datetime import datetime
-                    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-                    if html:
-                        hpath = os.path.join(DEBUG_DIR, f"{site}_{ts}.html")
-                        with open(hpath, "w", encoding="utf-8") as f:
-                            f.write(html)
-                    if png:
-                        ppath = os.path.join(DEBUG_DIR, f"{site}_{ts}.png")
-                        with open(ppath, "wb") as f:
-                            f.write(png)
-                        png_path = ppath
-        except Exception:
-            html = None
-    if not html:
-        return site, [], f"fetch error: {err}", png_path
-    prods = extract_products_strict(html, base, site, query, relevance_threshold=relevance)
-    return site, prods, None, png_path
+# --- Orchestration ---
+def scrape_site(site: str, template: str, query: str, relevance_threshold: float = 0.4, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None) -> Tuple[str, List[Product], str, Optional[str]]:
+    url = template.format(query=urllib.parse.quote_plus(query))
+    parsed = urllib.parse.urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    html = None
+    screenshot_path = None
+    err_msg = None
 
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="Sade Ürün+Fiyat Arama", layout="wide")
+    # requests ilk tercih
+    html, err = fetch_page_requests(url, timeout=10)
+    if not html:
+        # Selenium ile çek (JS gerekebilir)
+        wait_selector = SITE_WAIT_SELECTORS.get(site)
+        html, png, serr = fetch_page_selenium(url, wait_selector=wait_selector, wait_for_content=(wait_selector is None), timeout=25, headless=not debug, chrome_binary=chrome_binary, driver_path=driver_path)
+        if debug:
+            hpath, ppath = save_debug(site, html, png)
+            screenshot_path = ppath
+        if serr and not html:
+            return site, [], f"Fetch Hatası: {serr}", screenshot_path
+
+    # parse
+    parser = PARSERS.get(site, parse_generic)
+    try:
+        products = parser(html, base_url, site, query, relevance_threshold=relevance_threshold)
+        status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
+        return site, products, status, screenshot_path
+    except Exception as e:
+        return site, [], f"Ayrıştırma Hatası: {e}", screenshot_path
+
+def search_all(query: str, sites: List[str], max_workers: int = 3, relevance_threshold: float = 0.4, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None):
+    results = []
+    with __import__("concurrent.futures").ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(scrape_site, site, SEARCH_SITES[site], query, relevance_threshold, debug, chrome_binary, driver_path): site
+            for site in sites if site in SEARCH_SITES
+        }
+        for fut in __import__("concurrent.futures").as_completed(futures):
+            try:
+                results.append(fut.result())
+            except Exception:
+                pass
+    return results
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="Ürün-Fiyat (Motorobit düzeltmeli)", layout="wide")
 st.title("Ürün ve Fiyat (sadece ürün adı ve fiyat gösterilir)")
 
 with st.sidebar:
     st.header("Ayarlar")
-    relevance = st.slider("Alaka eşiği (başlıkta kaç anahtar bulunmalı)", 0.0, 1.0, 0.6, 0.1)
-    max_sites = st.multiselect("Siteler", list(SITES.keys()), default=list(SITES.keys()))
-    debug = st.checkbox("Debug (HTML/PNG kaydı ve Selenium GUI)", value=False)
+    sites = st.multiselect("Siteler", list(SEARCH_SITES.keys()), default=list(SEARCH_SITES.keys()))
+    max_workers = st.slider("Eşzamanlı site tarama", 1, 6, 3)
+    relevance = st.slider("Alaka eşiği (0 gevşek - 1 sıkı)", 0.0, 1.0, 0.4, 0.1)
+    debug_mode = st.checkbox("Debug (Selenium GUI & debug kayıtları)", value=False)
     chrome_bin = st.text_input("Chrome binary (opsiyonel)", value="")
     driver_path = st.text_input("Chromedriver path (opsiyonel)", value="")
 
-query = st.text_input("Aranacak ürün (örn: mp1584):", placeholder="örn: mp1584")
+query = st.text_input("Aranacak ürün (örn: mp1584, HC06 veya ürün URL'si):")
 
 if st.button("Ara"):
-    if not query.strip():
-        st.warning("Lütfen arama terimi girin.")
+    if not query or not query.strip():
+        st.warning("Lütfen bir arama terimi girin.")
     else:
+        q = query.strip()
+        # Eğer kullanıcı doğrudan ürün URL'si verdi ise site'yi tespit et ve doğrudan çek
+        direct_site = None
+        parsed_q = urllib.parse.urlparse(q)
+        if parsed_q.scheme and parsed_q.netloc:
+            # domain'den site belirle
+            domain = parsed_q.netloc.lower()
+            for s, tmpl in SEARCH_SITES.items():
+                if urllib.parse.urlparse(tmpl.format(query="x")).netloc in domain:
+                    direct_site = s
+                    break
+        results = []
+        if direct_site:
+            # doğrudan URL'yi çek ve parse et
+            st.info(f"Doğrudan URL tespiti: {direct_site}")
+            site, products, status, png = scrape_site(direct_site, SEARCH_SITES[direct_site], q, relevance_threshold=relevance, debug=debug_mode, chrome_binary=(chrome_bin or None), driver_path=(driver_path or None))
+            if status:
+                if "Hata" in status or "Engellendi" in status:
+                    st.error(f"{site}: {status}")
+            results.append((site, products, status, png))
+        else:
+            with st.spinner(f"{len(sites)} site aranıyor..."):
+                results = search_all(q, sites, max_workers=max_workers, relevance_threshold=relevance, debug=debug_mode, chrome_binary=(chrome_bin or None), driver_path=(driver_path or None))
+
+        # Sonuçları topla ve göster (yalnızca Ürün - Fiyat)
         all_products: List[Product] = []
-        for site in max_sites:
-            template = SITES.get(site)
-            site_name, prods, err, png_path = scrape_site_strict(site, template, query.strip(), relevance=relevance, debug=debug, selenium_fallback=True)
-            if err:
-                st.info(f"{site_name}: {err}")
-                continue
-            for p in prods:
-                all_products.append(p)
-            # debug görsel linki
-            if debug and png_path:
-                st.write(f"{site_name} debug ekran görüntüsü: {png_path}")
+        for site, prods, status, png in results:
+            if "Hata" in status:
+                st.error(f"{site}: {status}")
+            elif "bulunamadı" in status:
+                st.warning(f"{site}: {status}")
+                if debug_mode and png:
+                    st.image(png, caption=f"{site} - debug")
+            else:
+                st.success(f"{site}: {status}")
+            all_products.extend(prods)
 
         if not all_products:
-            st.error("Hiç ürün bulunamadı. Relevance eşiğini düşürmeyi veya debug modunu açıp HTML'i kontrol etmeyi deneyin.")
+            st.error("Hiç ürün bulunamadı. Debug modunu açıp HTML kaydını kontrol et veya alaka eşiğini düşür.")
         else:
-            # Sadece Ürün Adı ve Fiyat göster
-            # Tekilleştir ve küçük bir tablo
-            rows = []
+            # Tekilleştir ve sırala (fiyat bilinmeyenleri sona)
             seen = set()
+            rows = []
             for p in all_products:
                 key = (p.name.strip().lower(), p.price)
                 if key in seen:
                     continue
                 seen.add(key)
-                rows.append({"Site": p.site, "Ürün": p.name, "Fiyat": f"{p.price:,.2f} TL" if p.price is not None else "Bilinmiyor", "Link": p.url})
+                price_display = f"{p.price:,.2f} TL" if p.price is not None else "Bilinmiyor"
+                rows.append({"Ürün": p.name, "Fiyat": price_display, "Site": p.site, "Link": p.url, "price_val": (p.price if p.price is not None else float("inf"))})
             df = pd.DataFrame(rows)
-            # Sırala fiyat göre (bilinmeyen fiyatları sona al)
-            df["sort_key"] = df["Fiyat"].apply(lambda x: float(x.replace(".", "").replace(",", ".").split()[0]) if x != "Bilinmiyor" else float("inf"))
-            df = df.sort_values("sort_key").drop(columns=["sort_key"])
+            df = df.sort_values("price_val").drop(columns=["price_val"])
             st.dataframe(df[["Ürün", "Fiyat", "Site", "Link"]], use_container_width=True)
-            # ayrıca düz liste (sadece ürün - fiyat)
             st.markdown("### Sadece Ürün - Fiyat")
-            for _, row in df.iterrows():
-                st.write(f"- {row['Ürün']} — {row['Fiyat']} — ({row['Site']})")
+            for _, r in df.iterrows():
+                st.write(f"- {r['Ürün']} — {r['Fiyat']} — ({r['Site']})")
+
+st.caption("Not: Selenium ile yapılan istekler bazı sitelerin kullanım şartlarını etkileyebilir. Debug açmak local'de GUI gerektirebilir.")
