@@ -458,5 +458,65 @@ if st.button("Ara"):
     if not query or not query.strip():
         st.warning("Lütfen bir arama terimi girin.")
     else:
-        q = query.strip
-
+        q = query.strip()
+        # Eğer kullanıcı doğrudan ürün URL'si verdi ise site'yi tespit et ve doğrudan çek
+        direct_site = None
+        parsed_q = urllib.parse.urlparse(q)
+        if parsed_q.scheme and parsed_q.netloc:
+            domain = parsed_q.netloc.lower()
+            for s, tmpl in SEARCH_SITES.items():
+                tmpl_netloc = urllib.parse.urlparse(tmpl.format(query="x")).netloc
+                if tmpl_netloc and tmpl_netloc in domain:
+                    direct_site = s
+                    break
+
+        results = []
+        if direct_site:
+            st.info(f"Doğrudan URL tespiti: {direct_site}")
+            prods, err = fetch_and_parse_direct_url(q, direct_site, relevance_threshold=relevance, debug=debug_mode, chrome_binary=(chrome_bin or None), driver_path=(driver_path or None))
+            status = f"{len(prods)} ürün bulundu" if prods else (err or "Ürün bulunamadı")
+            if err:
+                st.error(f"{direct_site}: {err}")
+            else:
+                st.success(f"{direct_site}: {status}")
+            results.append((direct_site, prods, status, None))
+        else:
+            with st.spinner(f"{len(sites)} site aranıyor..."):
+                results = search_all(q, sites, max_workers=max_workers, relevance_threshold=relevance, debug=debug_mode, chrome_binary=(chrome_bin or None), driver_path=(driver_path or None))
+
+        # Sonuçları topla ve göster (yalnızca Ürün - Fiyat)
+        all_products: List[Product] = []
+        for site, prods, status, png in results:
+            if isinstance(status, str) and ("Hata" in status or "Engellendi" in status):
+                st.error(f"{site}: {status}")
+            elif isinstance(status, str) and "bulunamadı" in status:
+                st.warning(f"{site}: {status}")
+                # debug görsel
+                if debug_mode and png:
+                    st.image(png, caption=f"{site} - debug")
+            else:
+                # başarı durumu
+                st.info(f"{site}: {status}")
+            all_products.extend(prods)
+
+        if not all_products:
+            st.error("Hiç ürün bulunamadı. Debug modunu açıp HTML kaydını kontrol et veya alaka eşiğini düşür.")
+        else:
+            # Tekilleştir ve sırala (fiyat bilinmeyenleri sona)
+            seen = set()
+            rows = []
+            for p in all_products:
+                key = (p.name.strip().lower(), p.price)
+                if key in seen:
+                    continue
+                seen.add(key)
+                price_display = f"{p.price:,.2f} TL" if p.price is not None else "Bilinmiyor"
+                rows.append({"Ürün": p.name, "Fiyat": price_display, "Site": p.site, "Link": p.url, "price_val": (p.price if p.price is not None else float("inf"))})
+            df = pd.DataFrame(rows)
+            df = df.sort_values("price_val").drop(columns=["price_val"])
+            st.dataframe(df[["Ürün", "Fiyat", "Site", "Link"]], use_container_width=True)
+            st.markdown("### Sadece Ürün - Fiyat")
+            for _, r in df.iterrows():
+                st.write(f"- {r['Ürün']} — {r['Fiyat']} — ({r['Site']})")
+
+st.caption("Not: Selenium ile yapılan istekler bazı sitelerin kullanım şartlarını etkileyebilir. Debug açmak local'de GUI gerektirebilir.")
