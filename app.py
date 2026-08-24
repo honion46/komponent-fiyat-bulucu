@@ -19,16 +19,17 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
-    "Direnc.net": "https://www.direnc.net/arama?q={query}",
     "Motorobit": "https://www.motorobit.com/arama?kelime={query}",
     "Samm Market": "https://market.samm.com/search?s={query}",
-    "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
+    "Robolink": "https://www.robolinkmarket.com/?search_provider=aisearch&query={query}&page=1",
     "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
     "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama/{query}",
     "F1 Depo": "https://www.f1depo.com/arama/{query}",
-    "Özdisan": "https://www.ozdisan.com/Product/Search?searchtext={query}",
     "Robotzade": "https://www.robotzade.com/arama/{query}",
 }
+
+# Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
+SLOW_AJAX_SITES = {"Samm Market", "Robolink"}
 
 SITE_WAIT_SELECTORS = {}
 
@@ -254,7 +255,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
                 search_box.clear()
                 search_box.send_keys(query)
                 search_box.send_keys(Keys.ENTER)
-                time.sleep(4.0)
+                time.sleep(7.0)
             except Exception:
                 pass
         else:
@@ -266,6 +267,8 @@ def scrape_site(site: str, url_tmpl: str, query: str):
                     WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
                 except Exception:
                     pass
+            elif site in SLOW_AJAX_SITES:
+                time.sleep(7.0)
             else:
                 time.sleep(3.0)
 
