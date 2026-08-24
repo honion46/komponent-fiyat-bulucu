@@ -1,29 +1,35 @@
 import concurrent.futures
+import os
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
+
 import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-from curl_cffi import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
-# Odaklandığımız Elektronik Komponent Siteleri (Pazaryerleri de dahil)
 SEARCH_URL_TEMPLATES = {
-    "Direnc.net": "https://www.direnc.net/arama?q={query}",
-    "Özdisan": "https://www.ozdisan.com/Product/Search?searchtext={query}",
-    "Motorobit": "https://www.motorobit.com/arama?kelime={query}",
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
+    "Direnc.net": "https://www.direnc.net/arama?q={query}",
+    "Motorobit": "https://www.motorobit.com/arama?kelime={query}",
     "Samm Market": "https://market.samm.com/search?s={query}",
     "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
     "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
     "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama/{query}",
     "F1 Depo": "https://www.f1depo.com/arama/{query}",
+    "Özdisan": "https://www.ozdisan.com/Product/Search?searchtext={query}",
     "Robotzade": "https://www.robotzade.com/arama/{query}",
-    "Trendyol": "https://www.trendyol.com/sr?q={query}",
-    "Hepsiburada": "https://www.hepsiburada.com/ara?q={query}",
-    "N11": "https://www.n11.com/arama?q={query}",
-    "Amazon TR": "https://www.amazon.com.tr/s?k={query}",
 }
+
+SITE_WAIT_SELECTORS = {}
 
 PRICE_RE = re.compile(r"([\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺|TRY)", re.IGNORECASE)
 NUM_ONLY_RE = re.compile(r"^[\d.,]+$")
@@ -35,12 +41,16 @@ IGNORE_LINK_TEXT = {
     "hesabım", "sepetim", "günün fırsatları", "müşteri hizmetleri", "satış yap",
 }
 
+DEBUG_DIR = "debug_snapshots"
+
+
 @dataclass
 class Product:
     site: str
     name: str
     price: float | None
     url: str
+
 
 def parse_price(raw: str) -> float | None:
     raw = raw.strip().replace(".", "").replace(",", ".")
@@ -49,24 +59,11 @@ def parse_price(raw: str) -> float | None:
     except ValueError:
         return None
 
-def clean_text(text: str) -> str:
-    cleaned = re.sub(r'\s+', ' ', text).strip()
-    if len(cleaned) > 130:
-        cleaned = cleaned[:127] + "..."
-    return cleaned
 
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
-    
-    # Cloudflare veya Hata Sayfası Yakalandıysa Boş Döndür
-    if "Attention Required! | Cloudflare" in html or "cf-browser-verification" in html:
-        return []
 
-    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside", "template", "meta", "svg", "path"]):
-        tag.decompose()
-
-    # Pazaryerleri için Özel CSS Seçicileri
     if site_name == "Hepsiburada":
         products = []
         for card in soup.select('li[id^="i"]'):
@@ -74,8 +71,9 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_tag = card.select_one('div[data-test-id="price-current-price"]')
             link_tag = card.find("a", href=True)
             if name_tag and price_tag and link_tag:
-                name = clean_text(name_tag.get("title", "") or name_tag.get_text(strip=True))
-                if keywords and not any(k in name.lower() for k in keywords): continue
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
                 price = parse_price(price_tag.get_text(strip=True).replace("TL", "").strip())
                 href = link_tag["href"]
                 full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
@@ -89,8 +87,9 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_tag = card.select_one(".prc-box-dscntd") or card.select_one(".prc-box-sllng")
             link_tag = card.find("a", href=True)
             if name_tag and price_tag and link_tag:
-                name = clean_text(name_tag.get("title", "") or name_tag.get_text(strip=True))
-                if keywords and not any(k in name.lower() for k in keywords): continue
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
                 price = parse_price(price_tag.get_text(strip=True).replace("TL", "").strip())
                 href = link_tag["href"]
                 full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
@@ -104,8 +103,9 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_tag = card.select_one("ins") or card.select_one(".newPrice")
             link_tag = card.find("a", href=True)
             if name_tag and price_tag and link_tag:
-                name = clean_text(name_tag.get("title", "") or name_tag.get_text(strip=True))
-                if keywords and not any(k in name.lower() for k in keywords): continue
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
                 price = parse_price(price_tag.get_text(strip=True).replace("TL", "").strip())
                 href = link_tag["href"]
                 full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
@@ -120,28 +120,26 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             price_fraction = card.select_one("span.a-price-fraction")
             link_tag = card.select_one("h2 a")
             if name_tag and price_tag and link_tag:
-                name = clean_text(name_tag.get_text(strip=True))
-                if keywords and not any(k in name.lower() for k in keywords): continue
-                p_text = price_tag.get_text(strip=True) + ("," + price_fraction.get_text(strip=True) if price_fraction else "")
+                name = name_tag.get_text(strip=True)
+                if keywords and not any(k in name.lower() for k in keywords):
+                    continue
+                p_text = price_tag.get_text(strip=True)
+                if price_fraction:
+                    p_text += "," + price_fraction.get_text(strip=True)
                 price = parse_price(p_text)
                 href = link_tag["href"]
                 full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
                 products.append(Product(site_name, name, price, full_url))
         return products
 
-    # ---------------------------------------------------------
-    # STANDART KOMPONENT SİTELERİ İÇİN TEMİZ METİN AKIŞI
-    # Direnc.net, Özdisan, Motorobit vb.
-    # ---------------------------------------------------------
+    # Standart bileşen siteleri - metin akışı ayrıştırıcısı
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
+        tag.decompose()
+
     link_queue = []
     for a in soup.find_all("a"):
+        text = a.get_text(strip=True)
         href = a.get("href", "")
-        raw_text = a.get("title", "")
-        if len(raw_text) < 3:
-            raw_text = a.get_text(separator=" ", strip=True)
-            
-        text = clean_text(raw_text)
-        
         if not text or not href or text.lower() in IGNORE_LINK_TEXT or href.startswith("#") or "javascript:" in href:
             continue
         if keywords and not any(k in text.lower() for k in keywords):
@@ -158,7 +156,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             lines.append(f"{cur} TL")
             i += 2
         else:
-            lines.append(clean_text(cur))
+            lines.append(cur)
             i += 1
 
     results = []
@@ -193,40 +191,93 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
 
     return results
 
-def scrape_site_cffi(site: str, url_tmpl: str, query: str):
+
+def get_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+
+    binary_candidates = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
+    for path in binary_candidates:
+        if os.path.exists(path):
+            options.binary_location = path
+            break
+
+    try:
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'},
+    )
+    return driver
+
+
+def scrape_site(site: str, url_tmpl: str, query: str):
     encoded_query = urllib.parse.quote_plus(query)
     url = url_tmpl.format(query=encoded_query)
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
 
+    driver = None
     try:
-        # TLS Spoofing başlıyor: Sistem kendini Windows üzerindeki Chrome 110 gibi tanıtıyor.
-        response = requests.get(
-            url, 
-            impersonate="chrome110", 
-            timeout=15,
-            headers={
-                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Referer": "https://www.google.com/"
-            }
-        )
-        
-        # Eğer site bizi engellerse veya Cloudflare'de takılırsak yakalayalım
-        if response.status_code in [403, 503]:
-            return site, [], f"CF / Bot Koruması (HTTP {response.status_code})"
-            
-        html = response.text
+        driver = get_driver()
+        driver.set_page_load_timeout(25)
+        driver.get(url)
+
+        selector = SITE_WAIT_SELECTORS.get(site)
+        if selector:
+            try:
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+            except Exception:
+                pass
+        else:
+            time.sleep(3.0)
+
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+        time.sleep(1.0)
+
+        html = driver.page_source
         products = extract_products(html, base_url, site, query)
 
-        status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
-        return site, products, status
-    except Exception as e:
-        return site, [], "Zaman Aşımı / Bağlantı Hatası"
+        debug_png = None
+        debug_html_snippet = None
+        if not products:
+            try:
+                debug_png = driver.get_screenshot_as_png()
+            except Exception:
+                pass
+            debug_html_snippet = html[:3000]
 
-def search_all_cffi(query: str):
+        status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
+        return site, products, status, debug_png, debug_html_snippet
+    except Exception as e:
+        return site, [], f"Bağlantı Hatası / Engellendi ({e.__class__.__name__})", None, None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def search_all_selenium(query: str):
     results = []
-    # Aynı anda 4 siteyi hızlıca tara
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(scrape_site_cffi, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())
@@ -234,29 +285,33 @@ def search_all_cffi(query: str):
                 pass
     return results
 
-# --- Web UI (Streamlit) ---
-st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-st.title("⚡ Komponent Fiyat Karşılaştırma (Anti-Bot Bypass)")
 
-query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, lm35")
+st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
+st.title("⚡ Komponent Fiyat Karşılaştırma (Stealth Selenium)")
+
+query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
 if st.button("Fiyatları Getir", type="primary", use_container_width=True):
     if not query.strip():
         st.warning("Lütfen bir ürün adı girin.")
     else:
-        with st.spinner(f"Ağ kimliği gizlenerek {len(SEARCH_URL_TEMPLATES)} site aranıyor (Çok daha hızlı)..."):
-            site_results = search_all_cffi(query)
+        with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (15-30sn sürebilir)..."):
+            site_results = search_all_selenium(query)
 
         with st.expander("🔍 Site Tarama Durumları", expanded=False):
-            for site, prods, status in site_results:
-                if "Koruması" in status or "Hatası" in status:
+            for site, prods, status, debug_png, debug_html in site_results:
+                if "Hata" in status or "Engellendi" in status:
                     st.error(f"**{site}:** {status}")
                 elif "bulunamadı" in status:
                     st.warning(f"**{site}:** {status}")
+                    if debug_png:
+                        st.image(debug_png, caption=f"{site} - o an görünen sayfa", width=400)
+                    if debug_html:
+                        st.code(debug_html, language="html")
                 else:
                     st.success(f"**{site}:** {status}")
 
-        all_products = [p for _, prods, _ in site_results for p in prods]
+        all_products = [p for _, prods, _, _, _ in site_results for p in prods]
 
         if not all_products:
             st.error("Hiçbir sitede sonuç bulunamadı.")
