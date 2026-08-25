@@ -1,1 +1,4 @@
 
+chromium
+chromium-driver
+xvfb
