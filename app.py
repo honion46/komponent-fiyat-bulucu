@@ -431,11 +431,22 @@ def scrape_site(site: str, url_tmpl: str, query: str):
             except Exception:
                 body_text = ""
             price_matches = len(re.findall(r"\d[\d.,]*\s*(?:TL|₺)", body_text))
+
+            # İlk fiyatın etrafındaki HAM HTML'i bul (gerçek etiket yapısını görmek için)
+            raw_html_snippet = ""
+            m = re.search(r"\d[\d.,]*\s*(?:TL|₺)", html)
+            if m:
+                start = max(0, m.start() - 1200)
+                end = min(len(html), m.end() + 300)
+                raw_html_snippet = html[start:end]
+
             debug_html_snippet = (
                 f"[TOPLAM HTML UZUNLUĞU: {len(html)} karakter]\n"
                 f"[GÖRÜNÜR METİNDE FİYAT DESENİ SAYISI: {price_matches}]\n\n"
                 f"--- GÖRÜNÜR SAYFA METNİ (ilk 2500 karakter) ---\n"
-                f"{body_text[:2500]}"
+                f"{body_text[:2500]}\n\n"
+                f"--- İLK FİYATIN ETRAFINDAKİ HAM HTML ---\n"
+                f"{raw_html_snippet}"
             )
 
         status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
