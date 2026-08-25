@@ -1,1 +1,0 @@
-"""Komponent Fiyat Bulucu."""
