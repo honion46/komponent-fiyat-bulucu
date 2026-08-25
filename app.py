@@ -452,6 +452,15 @@ def dismiss_cookie_banner(driver):
 
 
 def scrape_site(site: str, url_tmpl: str, query: str):
+    for attempt in range(2):  # zaman aşımında bir kez daha dene
+        result = _scrape_site_once(site, url_tmpl, query)
+        status = result[2]
+        if "TimeoutException" not in status or attempt == 1:
+            return result
+    return result
+
+
+def _scrape_site_once(site: str, url_tmpl: str, query: str):
     encoded_query = urllib.parse.quote_plus(query)
     url = url_tmpl.format(query=encoded_query)
     base_url = "https://" + url.split("://", 1)[1].split("/", 1)[0]
@@ -459,7 +468,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
     driver = None
     try:
         driver = get_driver(stealth=(site in CLOUDFLARE_SITES))
-        driver.set_page_load_timeout(25)
+        driver.set_page_load_timeout(35)
         driver.get(url)
 
         time.sleep(1.0)
