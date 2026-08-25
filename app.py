@@ -205,6 +205,7 @@ def get_driver(stealth: bool = False):
     global _virtual_display
     options = Options()
 
+    display_ready = False
     if stealth:
         # Cloudflare gibi gelişmiş bot tespiti olan siteler için:
         # headless kapalı + sanal ekran (Xvfb) kullan, daha fazla iz gizle.
@@ -213,9 +214,14 @@ def get_driver(stealth: bool = False):
                 from pyvirtualdisplay import Display
                 _virtual_display = Display(visible=0, size=(1920, 1080))
                 _virtual_display.start()
+                display_ready = True
             except Exception:
-                pass
-    else:
+                _virtual_display = False  # tekrar denemesin
+        elif _virtual_display is not False:
+            display_ready = True
+
+    if not display_ready:
+        # Sanal ekran yoksa (kurulamadıysa) güvenli şekilde headless kullan
         options.add_argument("--headless=new")
 
     options.add_argument("--no-sandbox")
@@ -241,8 +247,15 @@ def get_driver(stealth: bool = False):
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
     except Exception:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+        except Exception:
+            # Son çare: stealth/görünür mod hiç çalışmadıysa zorla headless dene
+            if "--headless=new" not in options.arguments:
+                options.add_argument("--headless=new")
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
 
     stealth_js = """
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
