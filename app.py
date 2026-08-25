@@ -1,4 +1,5 @@
 import concurrent.futures
+import json
 import os
 import re
 import time
@@ -69,9 +70,73 @@ def parse_price(raw: str) -> float | None:
         return None
 
 
+def extract_products_jsonld(soup: BeautifulSoup, site_name: str, keywords: list[str]) -> list[Product]:
+    """schema.org JSON-LD (Product/ItemList) verisinden ürünleri çıkarır.
+    Metin/HTML tahminine göre çok daha güvenilir; birçok e-ticaret sitesi
+    SEO için bunu sayfaya gömer."""
+    found = []
+
+    def collect(obj):
+        if isinstance(obj, dict):
+            t = obj.get("@type")
+            if t == "Product":
+                found.append(obj)
+            elif t == "ItemList":
+                for el in obj.get("itemListElement", []):
+                    if isinstance(el, dict):
+                        collect(el.get("item", el))
+            else:
+                for v in obj.values():
+                    collect(v)
+        elif isinstance(obj, list):
+            for el in obj:
+                collect(el)
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        if not script.string:
+            continue
+        try:
+            data = json.loads(script.string)
+        except Exception:
+            continue
+        collect(data)
+
+    results = []
+    seen_urls = set()
+    for p in found:
+        name = (p.get("name") or "").strip()
+        if not name:
+            continue
+        if keywords and not any(k in name.lower() for k in keywords):
+            continue
+        offers = p.get("offers", {})
+        if isinstance(offers, list):
+            offers = offers[0] if offers else {}
+        url = p.get("url") or offers.get("url") or ""
+        if not url:
+            continue
+        price = None
+        raw_price = offers.get("price")
+        if raw_price is not None:
+            try:
+                price = float(str(raw_price).replace(",", "."))
+            except (TypeError, ValueError):
+                price = None
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append(Product(site_name, name, price, url))
+
+    return results
+
+
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
+
+    jsonld_results = extract_products_jsonld(soup, site_name, keywords)
+    if jsonld_results:
+        return jsonld_results
 
     if site_name == "Hepsiburada":
         products = []
