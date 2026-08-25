@@ -25,10 +25,11 @@ SEARCH_URL_TEMPLATES = {
     "F1 Depo": "https://www.f1depo.com/arama/{query}",
     "Robotzade": "https://www.robotzade.com/arama/{query}",
     "Elektrodepo": "https://www.elektrodepo.com/arama/{query}",
-    "Komponentci": "https://www.komponentci.net/arama?q={query}",
-    "RoboShop": "https://www.roboshop.com.tr/arama?q={query}",
+    "Komponentci": "https://www.komponentci.net/arama?tip=1&kat=0&word={query}&search=",
+    "RoboShop": "https://www.roboshop.com.tr/arama?k={query}",
     "Görsu Elektronik": "https://gorsuelektronik.com/arama?q={query}",
     "Robot Sepeti": "https://www.robotsepeti.com/arama?q={query}",
+    "Robo90": "https://www.robo90.com/arama?q={query}",
 }
 
 # Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
