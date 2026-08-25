@@ -5,6 +5,7 @@
 import os
 import re
 import time
+import json
 import urllib.parse
 import concurrent.futures as cf
 from dataclasses import dataclass
@@ -15,7 +16,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-import json
 
 # Selenium (fallback / JS-rendered sayfalar için)
 from selenium import webdriver
@@ -57,6 +57,7 @@ class Product:
     price: Optional[float]
     url: str
 
+# --- Yardımcılar ---
 def parse_price(raw: Optional[str]) -> Optional[float]:
     if not raw:
         return None
@@ -94,6 +95,7 @@ def save_debug(site: str, html: Optional[str], png: Optional[bytes]) -> Tuple[Op
         pass
     return html_path, png_path
 
+# --- Fetch: requests ve selenium fallback ---
 def fetch_requests(url: str, timeout: int = 10) -> Tuple[Optional[str], Optional[str]]:
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout)
@@ -164,40 +166,157 @@ def fetch_selenium(url: str, wait_selector: Optional[str] = None, wait_for_conte
             except Exception:
                 pass
 
-# Samm product page parser: JSON-LD / meta / büyük fiyat heuristiği
-def parse_samm_productpage(html: str, base_url: str) -> Optional[Product]:
+# --- Parsers ---
+
+def parse_generic(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.4) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
-    # 1) JSON-LD içinde Offer varsa dene
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
+        tag.decompose()
+    keywords = [k.lower() for k in query.split() if len(k) > 1]
+    results: List[Product] = []
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True)
+        if not text or len(text) < 3:
+            continue
+        if keywords and not any(k in text.lower() for k in keywords):
+            continue
+        parent = a.parent
+        price = None
+        if parent:
+            m = PRICE_RE.search(parent.get_text(" ", strip=True))
+            if m:
+                price = parse_price(m.group(1))
+        if price is None:
+            m2 = PRICE_RE.search(soup.get_text(" ", strip=True))
+            if m2:
+                price = parse_price(m2.group(1))
+        if price is not None:
+            results.append(Product(site=site, name=text, price=price, url=url_join(base_url, a["href"])))
+    seen = set()
+    out = []
+    for p in results:
+        key = (p.name.strip().lower(), p.price)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+def parse_motorobit(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.4) -> List[Product]:
+    soup = BeautifulSoup(html, "lxml")
+    keywords = [k.lower() for k in query.split() if len(k) > 1]
+    results: List[Product] = []
+    title_tag = soup.find(["h1", "h2"]) or soup.find("meta", property="og:title")
+    if title_tag:
+        title = title_tag.get_text(" ", strip=True) if hasattr(title_tag, "get_text") else (title_tag.get("content") if title_tag else "")
+        if title and (not keywords or any(k in title.lower() for k in keywords)):
+            parent = title_tag.parent if hasattr(title_tag, "parent") else soup
+            text_block = parent.get_text(" ", strip=True)
+            m_kdv = re.search(r"([\d\.,\s]+)\s*(?:TL|₺|TRY).*kdv", text_block, re.IGNORECASE)
+            if m_kdv:
+                price = parse_price(m_kdv.group(1))
+                if price is not None:
+                    results.append(Product(site=site, name=title, price=price, url=base_url))
+                    return results
+            m = PRICE_RE.search(text_block)
+            if m:
+                price = parse_price(m.group(1))
+                if price is not None:
+                    results.append(Product(site=site, name=title, price=price, url=base_url))
+                    return results
+    card_selectors = [".product-card", ".product-item", ".product", ".search-result", ".product-grid-item", ".products .item"]
+    price_selectors = [".price", ".product-price", ".prd-price", ".priceLabel", ".amount", ".priceText"]
+    for sel in card_selectors:
+        cards = soup.select(sel)
+        if not cards:
+            continue
+        for card in cards:
+            name_tag = card.select_one("h2, h3, .title, .product-title, a")
+            if not name_tag:
+                continue
+            name = name_tag.get_text(" ", strip=True)
+            if keywords and not any(k in name.lower() for k in keywords):
+                continue
+            price = None
+            for ps in price_selectors:
+                el = card.select_one(ps)
+                if el:
+                    m = PRICE_RE.search(el.get_text(" ", strip=True))
+                    if m:
+                        price = parse_price(m.group(1))
+                        break
+            if price is None:
+                m2 = PRICE_RE.search(card.get_text(" ", strip=True))
+                if m2:
+                    price = parse_price(m2.group(1))
+            link_tag = card.find("a", href=True)
+            href = url_join(base_url, link_tag["href"]) if link_tag else base_url
+            if price is not None:
+                results.append(Product(site=site, name=name, price=price, url=href))
+        if results:
+            break
+    if not results:
+        results = parse_generic(html, base_url, site, query, relevance_threshold=relevance_threshold)
+    seen = set()
+    out = []
+    for p in results:
+        key = (p.name.strip().lower(), p.price)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+# --- Samm specific parsing (improved) ---
+
+def parse_samm_productpage(html: str, base_url: str) -> Optional[Product]:
+    """
+    Robust Samm product page parser:
+    - Try JSON-LD / meta first
+    - Then find TL matches near the product title (ignore USD)
+    - Prefer matches mentioning 'kdv' or close to title; fallback to last TL match
+    """
+    soup = BeautifulSoup(html, "lxml")
+    title = None
+    og = soup.find("meta", property="og:title")
+    if og and og.get("content"):
+        title = og.get("content").strip()
+    if not title:
+        h = soup.find(["h1", "h2"])
+        if h:
+            title = h.get_text(" ", strip=True)
+
+    # 1) JSON-LD offers
     try:
         for script in soup.select('script[type="application/ld+json"]'):
             try:
                 data = json.loads(script.string or "{}")
-                # JSON-LD bazen liste olabiliyor
-                if isinstance(data, list):
-                    for d in data:
-                        if isinstance(d, dict) and d.get("@type", "").lower() in ("product", "offer"):
-                            offer = d.get("offers") or d
-                            if isinstance(offer, dict):
-                                price = offer.get("price") or offer.get("priceAmount")
-                                if price:
-                                    p = parse_price(str(price))
-                                    title = d.get("name") or soup.find("h1") and soup.find("h1").get_text(" ", strip=True)
-                                    return Product(site="Samm Market", name=(title or "").strip(), price=p, url=base_url)
-                elif isinstance(data, dict):
-                    if data.get("@type", "").lower() == "product":
-                        offers = data.get("offers")
+                if isinstance(data, dict):
+                    t = data.get("@type", "")
+                    if isinstance(t, str) and t.lower() == "product":
+                        offers = data.get("offers", {})
                         if isinstance(offers, dict):
                             price = offers.get("price") or offers.get("priceAmount")
                             if price:
                                 p = parse_price(str(price))
-                                title = data.get("name") or soup.find("h1") and soup.find("h1").get_text(" ", strip=True)
-                                return Product(site="Samm Market", name=(title or "").strip(), price=p, url=base_url)
+                                title_text = title or (data.get("name") or "")
+                                return Product(site="Samm Market", name=title_text.strip(), price=p, url=base_url)
+                elif isinstance(data, list):
+                    for d in data:
+                        if isinstance(d, dict) and isinstance(d.get("@type", ""), str) and d.get("@type", "").lower() == "product":
+                            offers = d.get("offers", {})
+                            if isinstance(offers, dict):
+                                price = offers.get("price") or offers.get("priceAmount")
+                                if price:
+                                    p = parse_price(str(price))
+                                    title_text = title or (d.get("name") or "")
+                                    return Product(site="Samm Market", name=title_text.strip(), price=p, url=base_url)
             except Exception:
                 continue
     except Exception:
         pass
 
-    # 2) meta tags (og:price:amount vb)
+    # 2) meta tags
     try:
         meta_price = None
         for name in ("product:price:amount", "og:price:amount", "price"):
@@ -207,32 +326,56 @@ def parse_samm_productpage(html: str, base_url: str) -> Optional[Product]:
                 break
         if meta_price:
             p = parse_price(meta_price)
-            title = (soup.find("h1") or soup.find("h2"))
-            title_text = title.get_text(" ", strip=True) if title else ""
+            title_text = (soup.find("h1") or soup.find("h2"))
+            title_text = title_text.get_text(" ", strip=True) if title_text else (title or "")
             return Product(site="Samm Market", name=title_text, price=p, url=base_url)
     except Exception:
         pass
 
-    # 3) sayfadaki tüm TL eşleşmelerini topla; prefer '+ KDV' yanındaki veya son görünen fiyat (genellikle büyük final fiyat)
+    # 3) text-based TL matching with title proximity and KDV preference
     text = soup.get_text(" ", strip=True)
     matches = list(PRICE_RE.finditer(text))
-    if matches:
-        # tercih sırası:
-        # - match içeren "KDV" ifadesi varsa onu kullan
-        for m in matches:
-            span_start = m.start()
-            window = text[max(0, span_start-60): m.end()+60].lower()
+    # filter TL/₺/KDV-containing matches in surrounding snippet
+    tl_matches = []
+    for m in matches:
+        snippet = text[max(0, m.start()-60): m.end()+60]
+        if re.search(r"(tl|₺|kdv|kdv dahil)", snippet, re.IGNORECASE):
+            tl_matches.append(m)
+    # if title exists and TL matches, pick closest to title
+    if title and tl_matches:
+        title_pos = text.lower().find(title.lower())
+        if title_pos >= 0:
+            best = min(tl_matches, key=lambda mm: abs(mm.start() - title_pos))
+            val = parse_price(best.group(1))
+            if val is not None:
+                return Product(site="Samm Market", name=title.strip(), price=val, url=base_url)
+    # prefer KDV-window match
+    if tl_matches:
+        for m in tl_matches:
+            window = text[max(0, m.start()-80): m.end()+80].lower()
             if "kdv" in window:
-                val = parse_price(m.group(1))
-                title = (soup.find("h1") or soup.find("h2"))
-                title_text = title.get_text(" ", strip=True) if title else ""
-                return Product(site="Samm Market", name=title_text, price=val, url=base_url)
-        # - yoksa son bulunan fiyatı al (sayfada küçük fiyat + büyük final fiyat varsa genelde sonuncu büyük olandır)
-        last = matches[-1]
-        val = parse_price(last.group(1))
-        title = (soup.find("h1") or soup.find("h2"))
-        title_text = title.get_text(" ", strip=True) if title else ""
-        return Product(site="Samm Market", name=title_text, price=val, url=base_url)
+                v = parse_price(m.group(1))
+                if v is not None:
+                    return Product(site="Samm Market", name=(title or "").strip(), price=v, url=base_url)
+        # fallback to last TL match
+        last = tl_matches[-1]
+        v = parse_price(last.group(1))
+        if v is not None:
+            return Product(site="Samm Market", name=(title or "").strip(), price=v, url=base_url)
+
+    # fallback: non-USD last match
+    if matches:
+        non_usd = []
+        for m in matches:
+            snippet = text[max(0, m.start()-20): m.end()+20]
+            if "$" in snippet:
+                continue
+            non_usd.append(m)
+        if non_usd:
+            last = non_usd[-1]
+            v = parse_price(last.group(1))
+            if v is not None:
+                return Product(site="Samm Market", name=(title or "").strip(), price=v, url=base_url)
 
     return None
 
@@ -252,10 +395,8 @@ def parse_samm_listing(html: str, base_url: str, query: str, relevance_threshold
             if not name_tag:
                 continue
             name = name_tag.get_text(" ", strip=True)
-            # link
             a = card.find("a", href=True)
             href = url_join(base_url, a["href"]) if a else base_url
-            # fiyat
             price = None
             for ps in price_selectors:
                 el = card.select_one(ps)
@@ -268,7 +409,6 @@ def parse_samm_listing(html: str, base_url: str, query: str, relevance_threshold
                 mm2 = PRICE_RE.search(card.get_text(" ", strip=True))
                 if mm2:
                     price = parse_price(mm2.group(1))
-            # basit alaka kontrolü (query kısa kodsa normalize ederek eşle)
             def norm(s): return re.sub(r"[^a-z0-9]", "", s.lower())
             if keywords:
                 score = sum(1 for k in keywords if k in norm(name))
@@ -281,8 +421,13 @@ def parse_samm_listing(html: str, base_url: str, query: str, relevance_threshold
 
 PARSERS: Dict[str, Any] = {
     "Samm Market": lambda html, base, site, q, relevance_threshold=0.3: (parse_samm_productpage(html, base) and [parse_samm_productpage(html, base)]) or parse_samm_listing(html, base, q, relevance_threshold),
+    "Motorobit": parse_motorobit,
+    "Robotzade": parse_generic,
+    "Robocombo": parse_generic,
+    "Robotistan": parse_generic,
 }
 
+# --- Orchestration ---
 def scrape_site(site: str, template: str, query: str, relevance_threshold: float = 0.3, debug: bool = False, chrome_binary: Optional[str] = None, driver_path: Optional[str] = None) -> Tuple[str, List[Product], str, Optional[str]]:
     url = template.format(query=urllib.parse.quote_plus(query))
     parsed = urllib.parse.urlparse(url)
@@ -358,7 +503,6 @@ if st.button("Ara"):
         results = []
         if direct_site:
             st.info(f"Doğrudan URL tespiti: {direct_site}")
-            # doğrudan ürün sayfası çek
             html, err = fetch_requests(q, timeout=10)
             png = None
             if not html:
