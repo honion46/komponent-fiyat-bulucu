@@ -1,6 +1,7 @@
 streamlit
+requests
 curl-cffi
 beautifulsoup4
 lxml
 pandas
-requests
+pytest
