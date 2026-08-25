@@ -141,10 +141,64 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
                 products.append(Product(site_name, name, price, full_url))
         return products
 
-    # Standart bileşen siteleri - metin akışı ayrıştırıcısı
+    # Standart bileşen siteleri - genel ayrıştırıcı
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
         tag.decompose()
 
+    results = []
+    seen_urls = set()
+
+    # YÖNTEM 1: Ürün kartının tamamı tek bir <a> içinde ise (çok yaygın kalıp),
+    # linkin kendi metninden hem ismi hem fiyatı çıkar.
+    badge_res = [
+        re.compile(r"peşin fiyatına \d+ taksit", re.IGNORECASE),
+        re.compile(r"\btaksit\b", re.IGNORECASE),
+        re.compile(r"ücretsiz kargo", re.IGNORECASE),
+        re.compile(r"stoktan teslim", re.IGNORECASE),
+        re.compile(r"\byeni\b", re.IGNORECASE),
+        re.compile(r"sepete ekle", re.IGNORECASE),
+        re.compile(r"favorilere ekle", re.IGNORECASE),
+        re.compile(r"i̇ncele|incele", re.IGNORECASE),
+        re.compile(r"\(\s*\d+\s*\)"),
+        re.compile(r"%\s*\d+"),
+        re.compile(r"\d+\s*yorum", re.IGNORECASE),
+        re.compile(r"stokta\s*yok", re.IGNORECASE),
+    ]
+
+    def clean_name(raw_text: str) -> str:
+        t = raw_text
+        for pat in badge_res:
+            t = pat.sub(" ", t)
+        t = PRICE_RE.sub(" ", t)
+        t = re.sub(r"\s+", " ", t).strip(" -–|")
+        return t.strip()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if not href or href.startswith("#") or "javascript:" in href:
+            continue
+        full_text = a.get_text(separator=" ", strip=True)
+        if not full_text:
+            continue
+        prices = PRICE_RE.findall(full_text)
+        if not prices:
+            continue  # fiyat içermeyen link muhtemelen kategori/menü linki
+        name = clean_name(full_text)
+        if not name or len(name) < 3:
+            continue
+        if keywords and not any(k in name.lower() for k in keywords):
+            continue
+        full_url = href if href.startswith("http") else base_url.rstrip("/") + "/" + href.lstrip("/")
+        if full_url in seen_urls:
+            continue
+        price = parse_price(prices[-1])  # birden fazla fiyat varsa sonuncusu (indirimli/güncel fiyat)
+        results.append(Product(site_name, name, price, full_url))
+        seen_urls.add(full_url)
+
+    if results:
+        return results
+
+    # YÖNTEM 2 (yedek): İsim ve fiyatın ayrı satırlarda olduğu eski kalıp
     link_queue = []
     for a in soup.find_all("a"):
         text = a.get_text(strip=True)
@@ -168,12 +222,10 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             lines.append(cur)
             i += 1
 
-    results = []
     link_idx = 0
     candidate_name = None
     candidate_url = None
     gap_counter = 0
-    seen_urls = set()
 
     for line in lines:
         if link_idx < len(link_queue) and line == link_queue[link_idx][0]:
