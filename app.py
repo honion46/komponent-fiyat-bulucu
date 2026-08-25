@@ -167,7 +167,6 @@ def fetch_selenium(url: str, wait_selector: Optional[str] = None, wait_for_conte
                 pass
 
 # --- Parsers ---
-
 def parse_generic(html: str, base_url: str, site: str, query: str, relevance_threshold: float = 0.4) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
@@ -279,12 +278,13 @@ def parse_samm_productpage(html: str, base_url: str) -> Optional[Product]:
     soup = BeautifulSoup(html, "lxml")
     title = None
     og = soup.find("meta", property="og:title")
+    title_elem = None
     if og and og.get("content"):
         title = og.get("content").strip()
     if not title:
-        h = soup.find(["h1", "h2"])
-        if h:
-            title = h.get_text(" ", strip=True)
+        title_elem = soup.find(["h1", "h2"])
+        if title_elem:
+            title = title_elem.get_text(" ", strip=True)
 
     # 1) JSON-LD offers
     try:
