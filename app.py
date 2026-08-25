@@ -18,22 +18,24 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
-    "Direnc.net": "https://www.direnc.net/arama?q={query}",
     "Motorobit": "https://www.motorobit.com/arama?q={query}",
-    "Samm Market": "https://market.samm.com/search?s={query}",
     "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
     "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
     "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama/{query}",
     "F1 Depo": "https://www.f1depo.com/arama/{query}",
     "Robotzade": "https://www.robotzade.com/arama/{query}",
+    "Elektrodepo": "https://www.elektrodepo.com/arama/{query}",
+    "Komponentci": "https://www.komponentci.net/arama?q={query}",
+    "RoboShop": "https://www.roboshop.com.tr/arama?q={query}",
+    "Görsu Elektronik": "https://gorsuelektronik.com/arama?q={query}",
+    "Robot Sepeti": "https://www.robotsepeti.com/arama?q={query}",
 }
 
 # Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
-SLOW_AJAX_SITES = {"Samm Market", "Robolink", "Motorobit"}
+SLOW_AJAX_SITES = {"Robolink", "Motorobit"}
 
-# Bu siteler headless tarayıcıyı Cloudflare üzerinden tespit edip engelliyor;
-# görünür (headless olmayan) mod + sanal ekran ile deneriz. Garanti değildir.
-CLOUDFLARE_SITES = {"Direnc.net"}
+# Bu siteler headless tarayıcıyı Cloudflare üzerinden tespit edip engelliyor
+CLOUDFLARE_SITES = set()
 
 SITE_WAIT_SELECTORS = {}
 
