@@ -18,6 +18,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
+    "Direnc.net": "https://www.direnc.net/arama?q={query}",
     "Motorobit": "https://www.motorobit.com/arama?q={query}",
     "Samm Market": "https://market.samm.com/search?s={query}",
     "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
@@ -29,6 +30,10 @@ SEARCH_URL_TEMPLATES = {
 
 # Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
 SLOW_AJAX_SITES = {"Samm Market", "Robolink", "Motorobit"}
+
+# Bu siteler headless tarayıcıyı Cloudflare üzerinden tespit edip engelliyor;
+# görünür (headless olmayan) mod + sanal ekran ile deneriz. Garanti değildir.
+CLOUDFLARE_SITES = {"Direnc.net"}
 
 SITE_WAIT_SELECTORS = {}
 
@@ -193,14 +198,32 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
     return results
 
 
-def get_driver():
+_virtual_display = None
+
+
+def get_driver(stealth: bool = False):
+    global _virtual_display
     options = Options()
-    options.add_argument("--headless=new")
+
+    if stealth:
+        # Cloudflare gibi gelişmiş bot tespiti olan siteler için:
+        # headless kapalı + sanal ekran (Xvfb) kullan, daha fazla iz gizle.
+        if _virtual_display is None:
+            try:
+                from pyvirtualdisplay import Display
+                _virtual_display = Display(visible=0, size=(1920, 1080))
+                _virtual_display.start()
+            except Exception:
+                pass
+    else:
+        options.add_argument("--headless=new")
+
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--lang=tr-TR")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument(
@@ -221,10 +244,19 @@ def get_driver():
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
 
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {"source": 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'},
-    )
+    stealth_js = """
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+    Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']});
+    window.chrome = { runtime: {} };
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters)
+    );
+    """
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
     return driver
 
 
@@ -293,7 +325,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
 
     driver = None
     try:
-        driver = get_driver()
+        driver = get_driver(stealth=(site in CLOUDFLARE_SITES))
         driver.set_page_load_timeout(25)
         driver.get(url)
 
@@ -307,7 +339,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
                 WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
             except Exception:
                 pass
-        elif site in SLOW_AJAX_SITES:
+        elif site in SLOW_AJAX_SITES or site in CLOUDFLARE_SITES:
             wait_for_real_content(driver, timeout=20)
         else:
             time.sleep(3.0)
