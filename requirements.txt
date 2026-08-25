@@ -1,7 +1,0 @@
-streamlit
-requests
-curl-cffi
-beautifulsoup4
-lxml
-pandas
-pytest
