@@ -198,6 +198,117 @@ def calculate_match_score(query: str, name: str, mpn: str = "") -> int:
     return min(100, score)
 
 
+
+def normalize_component_token(value: str) -> str:
+    """Elektronik parça kodlarını karşılaştırma için normalize eder."""
+    value = (value or "").lower()
+    value = value.replace("×", "x")
+    value = re.sub(r"[^a-z0-9çğıöşü]+", "", value)
+    return value
+
+
+def extract_manufacturer(text: str) -> str:
+    patterns = [
+        r"(?:üretici|marka|manufacturer)\s*:?\s*([A-Za-z0-9][A-Za-z0-9 ._-]{1,40})",
+        r"(?:manufacturername|brand)\s*[:=]\s*[\"']?([A-Za-z0-9][A-Za-z0-9 ._-]{1,40})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text or "", re.IGNORECASE)
+        if m:
+            return m.group(1).strip(" ._-")
+    return ""
+
+
+def extract_package(text: str) -> str:
+    patterns = [
+        r"\b(DIP[- ]?\d+)\b",
+        r"\b(SOIC[- ]?\d+)\b",
+        r"\b(TSSOP[- ]?\d+)\b",
+        r"\b(SSOP[- ]?\d+)\b",
+        r"\b(QFN[- ]?\d+)\b",
+        r"\b(QFP[- ]?\d+)\b",
+        r"\b(LQFP[- ]?\d+)\b",
+        r"\b(TQFP[- ]?\d+)\b",
+        r"\b(TO[- ]?\d+)\b",
+        r"\b(SMD)\b",
+        r"\b(THT)\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text or "", re.IGNORECASE)
+        if m:
+            return re.sub(r"\s+", "-", m.group(1).upper())
+    return ""
+
+
+def calculate_match_score(query: str, name: str, mpn: str = "", package: str = "", manufacturer: str = "") -> int:
+    """V1.2 eşleşme: tam parça kodunu benzer kodlardan ayırır."""
+    clean_query, _ = parse_query_quantity(query)
+    q = clean_query.strip().lower()
+    n = (name or "").lower()
+    m = (mpn or "").lower()
+    p = (package or "").lower()
+    mf = (manufacturer or "").lower()
+
+    if not q:
+        return 0
+
+    qn = normalize_component_token(q)
+    mn = normalize_component_token(m)
+    nn = normalize_component_token(n)
+
+    score = 0
+
+    # Tam MPN: en güçlü sinyal.
+    if mn and mn == qn:
+        score += 65
+    elif mn and qn and qn in mn:
+        score += 48
+
+    # Ürün adında exact component token.
+    if qn and qn in nn:
+        score += 25
+
+    # Kelime eşleşmesi.
+    words = [w for w in re.findall(r"[a-z0-9çğıöşü.+/-]+", q) if len(w) > 1]
+    if words:
+        matched = sum(1 for w in words if w in n or w in m)
+        score += round(20 * matched / len(words))
+
+    # Kullanıcı açıkça paket/üretici yazdıysa bonus.
+    query_package = extract_package(clean_query)
+    query_manufacturer = extract_manufacturer(clean_query)
+
+    if query_package:
+        if p and normalize_component_token(query_package) == normalize_component_token(p):
+            score += 10
+        elif p:
+            score -= 8
+
+    if query_manufacturer:
+        if mf and normalize_component_token(query_manufacturer) == normalize_component_token(mf):
+            score += 10
+        elif mf:
+            score -= 8
+
+    return max(0, min(100, score))
+
+
+def enrich_product(product: Product, query: str, source_text: str = "") -> Product:
+    combined = f"{product.name} {product.mpn} {source_text}"
+    if not product.mpn:
+        product.mpn = extract_mpn(combined)
+    if product.stock == "Bilinmiyor":
+        product.stock = detect_stock(combined)
+    product.match_score = calculate_match_score(
+        query,
+        product.name,
+        product.mpn,
+        extract_package(combined),
+        extract_manufacturer(combined),
+    )
+    return product
+
+
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
@@ -207,7 +318,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
         for p in jsonld_results:
             p.mpn = extract_mpn(p.name)
             p.stock = detect_stock(p.name)
-            p.match_score = calculate_match_score(query, p.name, p.mpn)
+            enrich_product(p, query, p.name)
         return jsonld_results
 
     if site_name == "Hepsiburada":
@@ -393,7 +504,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
             p.mpn = extract_mpn(p.name)
         if p.stock == "Bilinmiyor":
             p.stock = detect_stock(p.name)
-        p.match_score = calculate_match_score(query, p.name, p.mpn)
+        enrich_product(p, query, p.name)
 
     return results
 
@@ -613,9 +724,7 @@ def search_all_selenium(query: str):
                 site, products, status, debug_png, debug_html = future.result()
                 for product in products:
                     product.quantity = quantity
-                    product.match_score = calculate_match_score(
-                        clean_query, product.name, product.mpn
-                    )
+                    enrich_product(product, clean_query, product.name)
                 results.append((site, products, status, debug_png, debug_html))
             except Exception:
                 pass
@@ -659,6 +768,7 @@ def build_basket_comparison(items: list[str], all_results: dict) -> dict:
 
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
 st.title("⚡ Komponent Fiyat Karşılaştırma (Stealth Selenium)")
+st.caption("V1.2 • Daha sıkı komponent eşleşmesi • MPN / paket / üretici ayrımı • Zayıf eşleşme filtresi")
 
 tab_single, tab_basket = st.tabs(["🔍 Tek Ürün", "🛒 Sepet Karşılaştırma"])
 
@@ -686,6 +796,25 @@ with tab_single:
                         st.success(f"**{site}:** {status}")
 
             all_products = [p for _, prods, _, _, _ in site_results for p in prods]
+
+            # V1.2: zayıf eşleşmeleri kullanıcı isterse gizleyebilir.
+            min_score = st.slider(
+                "Minimum eşleşme güveni",
+                min_value=0,
+                max_value=100,
+                value=40,
+                step=5,
+                help="Düşük puanlı benzer ama yanlış komponentleri sonuçlardan çıkarır.",
+            )
+            filtered_products = [p for p in all_products if p.match_score >= min_score]
+
+            if not filtered_products and all_products:
+                st.warning(
+                    f"%{min_score} altındaki eşleşmeler filtrelendi. "
+                    "Minimum güveni düşürerek diğer sonuçları görebilirsiniz."
+                )
+
+            all_products = filtered_products
 
             if not all_products:
                 st.error("Hiçbir sitede sonuç bulunamadı.")
