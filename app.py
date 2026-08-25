@@ -60,6 +60,10 @@ class Product:
     name: str
     price: float | None
     url: str
+    mpn: str = ""
+    stock: str = "Bilinmiyor"
+    match_score: int = 0
+    quantity: int = 1
 
 
 def parse_price(raw: str) -> float | None:
@@ -71,9 +75,7 @@ def parse_price(raw: str) -> float | None:
 
 
 def extract_products_jsonld(soup: BeautifulSoup, site_name: str, keywords: list[str]) -> list[Product]:
-    """schema.org JSON-LD (Product/ItemList) verisinden ürünleri çıkarır.
-    Metin/HTML tahminine göre çok daha güvenilir; birçok e-ticaret sitesi
-    SEO için bunu sayfaya gömer."""
+    """schema.org JSON-LD (Product/ItemList) verisinden ürünleri çıkarır. Metin/HTML tahminine göre çok daha güvenilir; birçok e-ticaret sitesi SEO için bunu sayfaya gömer."""
     found = []
 
     def collect(obj):
@@ -130,12 +132,82 @@ def extract_products_jsonld(soup: BeautifulSoup, site_name: str, keywords: list[
     return results
 
 
+
+def parse_query_quantity(query: str) -> tuple[str, int]:
+    """MP1584 x 5 / MP1584 5 adet gibi sorgulardan miktarı ayırır."""
+    q = query.strip()
+    for pattern in (
+        r"\s*[xX×]\s*(\d+)\s*$",
+        r"\s+(\d+)\s*(?:adet|ad)\s*$",
+    ):
+        m = re.search(pattern, q, re.IGNORECASE)
+        if m:
+            return q[:m.start()].strip(), max(1, int(m.group(1)))
+    return q, 1
+
+
+def detect_stock(text: str) -> str:
+    t = text.lower()
+    if any(x in t for x in (
+        "stokta yok", "stok dışı", "tükendi",
+        "stokta bulunmuyor", "satışta değil"
+    )):
+        return "Yok"
+    if any(x in t for x in (
+        "sepete ekle", "stokta", "hemen al",
+        "stok adedi", "stok miktarı"
+    )):
+        return "Var"
+    return "Bilinmiyor"
+
+
+def extract_mpn(text: str) -> str:
+    patterns = [
+        r"(?:ürün|stok|parça)\s*(?:kodu|no|numarası)\s*:?\s*([A-Za-z0-9][A-Za-z0-9._/-]{2,})",
+        r"\bMPN\s*:?\s*([A-Za-z0-9][A-Za-z0-9._/-]{2,})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def calculate_match_score(query: str, name: str, mpn: str = "") -> int:
+    clean_query, _ = parse_query_quantity(query)
+    q = clean_query.lower().strip()
+    n = (name or "").lower()
+    m = (mpn or "").lower()
+
+    if not q:
+        return 0
+
+    score = 0
+    if m and m == q:
+        score += 60
+    elif m and q in m:
+        score += 45
+    elif q in n:
+        score += 40
+
+    words = [w for w in re.findall(r"[a-z0-9çğıöşü.+/-]+", q) if len(w) > 1]
+    if words:
+        matched = sum(1 for w in words if w in n or w in m)
+        score += round(40 * matched / len(words))
+
+    return min(100, score)
+
+
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
 
     jsonld_results = extract_products_jsonld(soup, site_name, keywords)
-    if jsonld_results:
+    if jsonld_results and any(p.price is not None for p in jsonld_results):
+        for p in jsonld_results:
+            p.mpn = extract_mpn(p.name)
+            p.stock = detect_stock(p.name)
+            p.match_score = calculate_match_score(query, p.name, p.mpn)
         return jsonld_results
 
     if site_name == "Hepsiburada":
@@ -315,6 +387,14 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
                 candidate_name = None
                 candidate_url = None
 
+    # Son güvenlik katmanı: bütün sonuçlara MPN/stok/eşleşme bilgisi ekle.
+    for p in results:
+        if not p.mpn:
+            p.mpn = extract_mpn(p.name)
+        if p.stock == "Bilinmiyor":
+            p.stock = detect_stock(p.name)
+        p.match_score = calculate_match_score(query, p.name, p.mpn)
+
     return results
 
 
@@ -377,31 +457,14 @@ def get_driver(stealth: bool = False):
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
 
-    stealth_js = """
-    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-    Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']});
-    window.chrome = { runtime: {} };
-    const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications'
-            ? Promise.resolve({ state: Notification.permission })
-            : originalQuery(parameters)
-    );
-    """
+    stealth_js = """ Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]}); Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']}); window.chrome = { runtime: {} }; const originalQuery = window.navigator.permissions.query; window.navigator.permissions.query = (parameters) => ( parameters.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(parameters) ); """
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
     return driver
 
 
 def wait_for_real_content(driver, timeout=15, min_matches=2):
-    """Sayfada gerçek ürün fiyatları görünene kadar bekler.
-    Tek bir eşleşme (kargo bedava banner'ı gibi) yanlış pozitif olabileceği için
-    en az min_matches kadar fiyat deseni arar."""
-    js_check = """
-    const t = document.body.innerText || '';
-    const matches = t.match(/\\d[\\d.,]*\\s*(TL|₺)/g) || [];
-    return matches.length;
-    """
+    """Sayfada gerçek ürün fiyatları görünene kadar bekler. Tek bir eşleşme (kargo bedava banner'ı gibi) yanlış pozitif olabileceği için en az min_matches kadar fiyat deseni arar."""
+    js_check = """ const t = document.body.innerText || ''; const matches = t.match(/\\d[\\d.,]*\\s*(TL|₺)/g) || []; return matches.length; """
     end_time = time.time() + timeout
     while time.time() < end_time:
         try:
@@ -422,26 +485,7 @@ def dismiss_cookie_banner(driver):
         "daha sonra", "şimdi değil", "hayır", "vazgeç", "kapat", "reddet",
         "not now", "no thanks", "dismiss", "close",
     ]
-    js = """
-    const texts = arguments[0];
-    const nodes = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
-    for (const el of nodes) {
-        const t = (el.innerText || '').trim().toLowerCase();
-        if (t && texts.some(x => t.includes(x)) && t.length < 40) {
-            el.click();
-            return true;
-        }
-    }
-    // Genel kapatma ikonlarını dene (aria-label ile)
-    const closeEls = document.querySelectorAll(
-        '[aria-label*="close" i], [aria-label*="kapat" i], .close, .modal-close, .popup-close'
-    );
-    for (const el of closeEls) {
-        el.click();
-        return true;
-    }
-    return false;
-    """
+    js = """ const texts = arguments[0]; const nodes = document.querySelectorAll('button, a, div[role="button"], span[role="button"]'); for (const el of nodes) { const t = (el.innerText || '').trim().toLowerCase(); if (t && texts.some(x => t.includes(x)) && t.length < 40) { el.click(); return true; } } // Genel kapatma ikonlarını dene (aria-label ile) const closeEls = document.querySelectorAll( '[aria-label*="close" i], [aria-label*="kapat" i], .close, .modal-close, .popup-close' ); for (const el of closeEls) { el.click(); return true; } return false; """
     try:
         driver.execute_script(js, texts)
         # ESC tuşu da bazı modalleri kapatır
@@ -557,61 +601,208 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
 
 
 def search_all_selenium(query: str):
+    clean_query, quantity = parse_query_quantity(query)
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(scrape_site, site, tmpl, query): site for site, tmpl in SEARCH_URL_TEMPLATES.items()}
+        futures = {
+            executor.submit(scrape_site, site, tmpl, clean_query): site
+            for site, tmpl in SEARCH_URL_TEMPLATES.items()
+        }
         for future in concurrent.futures.as_completed(futures):
             try:
-                results.append(future.result())
+                site, products, status, debug_png, debug_html = future.result()
+                for product in products:
+                    product.quantity = quantity
+                    product.match_score = calculate_match_score(
+                        clean_query, product.name, product.mpn
+                    )
+                results.append((site, products, status, debug_png, debug_html))
             except Exception:
                 pass
     return results
 
 
+def search_basket(items: list[str], progress_callback=None) -> dict:
+    """Sepetteki her ürün için tüm siteleri arar. Döner: {ürün: site_results}."""
+    all_results = {}
+    for idx, item in enumerate(items):
+        if progress_callback:
+            progress_callback(idx, item)
+        all_results[item] = search_all_selenium(item)
+    return all_results
+
+
+def build_basket_comparison(items: list[str], all_results: dict) -> dict:
+    """Her site için sepetteki ürünlerin en ucuz eşleşmesini bulup toplar."""
+    comparison = {
+        site: {"total": 0.0, "found_count": 0, "missing": [], "picks": {}}
+        for site in SEARCH_URL_TEMPLATES
+    }
+
+    for item in items:
+        site_results = all_results.get(item, [])
+        found_sites = set()
+        for site, prods, status, _debug_png, _debug_html in site_results:
+            priced = [p for p in prods if p.price is not None]
+            if priced:
+                cheapest = min(priced, key=lambda p: p.price)
+                comparison[site]["total"] += cheapest.price * max(1, cheapest.quantity)
+                comparison[site]["found_count"] += 1
+                comparison[site]["picks"][item] = cheapest
+                found_sites.add(site)
+        for site in SEARCH_URL_TEMPLATES:
+            if site not in found_sites:
+                comparison[site]["missing"].append(item)
+
+    return comparison
+
+
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
 st.title("⚡ Komponent Fiyat Karşılaştırma (Stealth Selenium)")
 
-query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
+tab_single, tab_basket = st.tabs(["🔍 Tek Ürün", "🛒 Sepet Karşılaştırma"])
 
-if st.button("Fiyatları Getir", type="primary", use_container_width=True):
-    if not query.strip():
-        st.warning("Lütfen bir ürün adı girin.")
-    else:
-        with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (15-30sn sürebilir)..."):
-            site_results = search_all_selenium(query)
+with tab_single:
+    query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
-        with st.expander("🔍 Site Tarama Durumları", expanded=False):
-            for site, prods, status, debug_png, debug_html in site_results:
-                if "Hata" in status or "Engellendi" in status:
-                    st.error(f"**{site}:** {status}")
-                elif "bulunamadı" in status:
-                    st.warning(f"**{site}:** {status}")
-                    if debug_png:
-                        st.image(debug_png, caption=f"{site} - o an görünen sayfa", width=400)
-                    if debug_html:
-                        st.code(debug_html, language="html")
-                else:
-                    st.success(f"**{site}:** {status}")
-
-        all_products = [p for _, prods, _, _, _ in site_results for p in prods]
-
-        if not all_products:
-            st.error("Hiçbir sitede sonuç bulunamadı.")
+    if st.button("Fiyatları Getir", type="primary", use_container_width=True, key="single_search"):
+        if not query.strip():
+            st.warning("Lütfen bir ürün adı girin.")
         else:
-            all_products.sort(key=lambda p: (p.price is None, p.price or 0))
-            data = [
-                {
-                    "Site": r.site,
-                    "Fiyat": f"{r.price:,.2f} TL" if r.price is not None else "Fiyat Çekilemedi",
-                    "Ürün Adı": r.name,
-                    "Link": r.url,
-                }
-                for r in all_products
-            ]
-            df = pd.DataFrame(data)
-            st.dataframe(
-                df,
-                column_config={"Link": st.column_config.LinkColumn("Satın Al")},
-                hide_index=True,
-                use_container_width=True,
+            with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (15-30sn sürebilir)..."):
+                site_results = search_all_selenium(query)
+
+            with st.expander("🔍 Site Tarama Durumları", expanded=False):
+                for site, prods, status, debug_png, debug_html in site_results:
+                    if "Hata" in status or "Engellendi" in status:
+                        st.error(f"**{site}:** {status}")
+                    elif "bulunamadı" in status:
+                        st.warning(f"**{site}:** {status}")
+                        if debug_png:
+                            st.image(debug_png, caption=f"{site} - o an görünen sayfa", width=400)
+                        if debug_html:
+                            st.code(debug_html, language="html")
+                    else:
+                        st.success(f"**{site}:** {status}")
+
+            all_products = [p for _, prods, _, _, _ in site_results for p in prods]
+
+            if not all_products:
+                st.error("Hiçbir sitede sonuç bulunamadı.")
+            else:
+                all_products.sort(
+                    key=lambda p: (-p.match_score, p.price is None, p.price or 0)
+                )
+                data = [
+                    {
+                        "Site": r.site,
+                        "Eşleşme": f"%{r.match_score}",
+                        "Stok": r.stock,
+                        "MPN": r.mpn,
+                        "Birim Fiyat": f"{r.price:,.2f} TL" if r.price is not None else "—",
+                        "Adet": r.quantity,
+                        "Toplam": (
+                            f"{r.price * r.quantity:,.2f} TL"
+                            if r.price is not None else "—"
+                        ),
+                        "Ürün Adı": r.name,
+                        "Link": r.url,
+                    }
+                    for r in all_products
+                ]
+                df = pd.DataFrame(data)
+                st.dataframe(
+                    df,
+                    column_config={"Link": st.column_config.LinkColumn("Satın Al")},
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+with tab_basket:
+    st.caption("Her satıra bir ürün yazın. Her ürün tüm sitelerde aranıp, hangi sitenin sepetin tamamını en ucuza karşıladığı hesaplanır.")
+    basket_text = st.text_area(
+        "Sepetiniz (her satıra bir ürün):",
+        placeholder="esp32\nhc05\n1k direnç\nbreadboard",
+        height=150,
+    )
+
+    if st.button("Sepeti Karşılaştır", type="primary", use_container_width=True, key="basket_search"):
+        items = [ln.strip() for ln in basket_text.split("\n") if ln.strip()]
+        if not items:
+            st.warning("Lütfen en az bir ürün girin.")
+        else:
+            progress_bar = st.progress(0, text="Başlıyor...")
+
+            def _update_progress(idx, item):
+                progress_bar.progress(
+                    idx / len(items),
+                    text=f"({idx + 1}/{len(items)}) '{item}' tüm sitelerde aranıyor...",
+                )
+
+            all_results = search_basket(items, progress_callback=_update_progress)
+            progress_bar.progress(1.0, text="Tamamlandı!")
+
+            comparison = build_basket_comparison(items, all_results)
+
+            # Tam sepeti karşılayan (hiçbir eksik olmayan) siteleri önce, sonra en ucuzdan pahalıya sırala.
+            # Eksik ürünü olanları da en az eksikten en ucuza doğru sırala.
+            ranked_sites = sorted(
+                comparison.items(),
+                key=lambda kv: (len(kv[1]["missing"]), kv[1]["total"] if kv[1]["found_count"] > 0 else float("inf")),
             )
+
+            full_coverage = [(s, d) for s, d in ranked_sites if not d["missing"] and d["found_count"] > 0]
+
+            if full_coverage:
+                best_site, best_data = full_coverage[0]
+                st.success(
+                    f"🏆 **En ucuz tam sepet: {best_site}** — Toplam: **{best_data['total']:,.2f} TL** "
+                    f"({best_data['found_count']}/{len(items)} ürün bulundu)"
+                )
+            else:
+                st.warning("Sepetin tamamını tek başına karşılayan bir site bulunamadı. Aşağıda en iyi kısmi eşleşmeler listeleniyor.")
+
+            summary_rows = []
+            for site, d in ranked_sites:
+                if d["found_count"] == 0:
+                    continue
+                summary_rows.append({
+                    "Site": site,
+                    "Bulunan": f"{d['found_count']}/{len(items)}",
+                    "Toplam Fiyat": f"{d['total']:,.2f} TL",
+                    "Eksik Ürünler": ", ".join(d["missing"]) if d["missing"] else "—",
+                })
+
+            if summary_rows:
+                st.subheader("📊 Site Karşılaştırması")
+                st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+            else:
+                st.error("Hiçbir sitede sepetteki ürünlerden herhangi biri bulunamadı.")
+
+            with st.expander("📋 Ürün Bazında Detay (hangi site hangi fiyatı verdi)", expanded=False):
+                for item in items:
+                    st.markdown(f"**{item}**")
+                    item_rows = []
+                    for site, d in ranked_sites:
+                        pick = d["picks"].get(item)
+                        if pick:
+                            item_rows.append({
+                                "Site": site,
+                                "Birim Fiyat": f"{pick.price:,.2f} TL",
+                                "Adet": pick.quantity,
+                                "Toplam": f"{pick.price * max(1, pick.quantity):,.2f} TL",
+                                "Eşleşme": f"%{pick.match_score}",
+                                "Stok": pick.stock,
+                                "Ürün Adı": pick.name,
+                                "Link": pick.url,
+                            })
+                    if item_rows:
+                        item_rows.sort(key=lambda r: float(r["Birim Fiyat"].replace(" TL", "").replace(".", "").replace(",", ".")))
+                        st.dataframe(
+                            pd.DataFrame(item_rows),
+                            column_config={"Link": st.column_config.LinkColumn("Satın Al")},
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+                    else:
+                        st.caption("Hiçbir sitede bulunamadı.")
