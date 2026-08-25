@@ -11,7 +11,7 @@ from src.core.models import ProductResult
 class RobotistanAdapter(SellerAdapter):
     name = "Robotistan"
 
-    SEARCH_URL = "https://www.robotistan.com/arama?q={}"
+SEARCH_URL = "https://www.robotistan.com/search?text={}"
 
     HEADERS = {
         "User-Agent": (
