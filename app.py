@@ -432,13 +432,34 @@ def scrape_site(site: str, url_tmpl: str, query: str):
                 body_text = ""
             price_matches = len(re.findall(r"\d[\d.,]*\s*(?:TL|₺)", body_text))
 
-            # İlk fiyatın etrafındaki HAM HTML'i bul (gerçek etiket yapısını görmek için)
+            # Gerçek bir ürün adını bul (banner değil): body_text'te bir satırın
+            # hemen ardından fiyat satırı geliyorsa, o satır muhtemelen ürün adıdır.
             raw_html_snippet = ""
-            m = re.search(r"\d[\d.,]*\s*(?:TL|₺)", html)
-            if m:
-                start = max(0, m.start() - 1200)
-                end = min(len(html), m.end() + 300)
-                raw_html_snippet = html[start:end]
+            body_lines = [ln.strip() for ln in body_text.split("\n") if ln.strip()]
+            price_line_re = re.compile(r"^\d[\d.,]*\s*(?:TL|₺)$", re.IGNORECASE)
+            candidate_name_line = None
+            for idx in range(len(body_lines) - 1):
+                if price_line_re.match(body_lines[idx + 1]) and len(body_lines[idx]) > 8 and not price_line_re.match(body_lines[idx]):
+                    candidate_name_line = body_lines[idx]
+                    break
+
+            if candidate_name_line:
+                pos = html.find(candidate_name_line)
+                if pos == -1:
+                    # HTML entity kaçışları yüzünden bulunamadıysa ilk birkaç kelimeyi dene
+                    first_word = candidate_name_line.split(" ")[0]
+                    pos = html.find(first_word)
+                if pos != -1:
+                    start = max(0, pos - 1000)
+                    end = min(len(html), pos + 800)
+                    raw_html_snippet = html[start:end]
+
+            if not raw_html_snippet:
+                m = re.search(r"\d[\d.,]*\s*(?:TL|₺)", html)
+                if m:
+                    start = max(0, m.start() - 1200)
+                    end = min(len(html), m.end() + 300)
+                    raw_html_snippet = html[start:end]
 
             debug_html_snippet = (
                 f"[TOPLAM HTML UZUNLUĞU: {len(html)} karakter]\n"
