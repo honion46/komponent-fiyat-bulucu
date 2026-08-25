@@ -326,7 +326,17 @@ def scrape_site(site: str, url_tmpl: str, query: str):
                 debug_png = driver.get_screenshot_as_png()
             except Exception:
                 pass
-            debug_html_snippet = html[:3000]
+            try:
+                body_text = driver.execute_script("return document.body.innerText || '';")
+            except Exception:
+                body_text = ""
+            price_matches = len(re.findall(r"\d[\d.,]*\s*(?:TL|₺)", body_text))
+            debug_html_snippet = (
+                f"[TOPLAM HTML UZUNLUĞU: {len(html)} karakter]\n"
+                f"[GÖRÜNÜR METİNDE FİYAT DESENİ SAYISI: {price_matches}]\n\n"
+                f"--- GÖRÜNÜR SAYFA METNİ (ilk 2500 karakter) ---\n"
+                f"{body_text[:2500]}"
+            )
 
         status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
         return site, products, status, debug_png, debug_html_snippet
