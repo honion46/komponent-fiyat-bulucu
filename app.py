@@ -20,7 +20,7 @@ SEARCH_URL_TEMPLATES = {
     "Robotistan": "https://www.robotistan.com/arama?q={query}",
     "Motorobit": "https://www.motorobit.com/arama?q={query}",
     "Samm Market": "https://market.samm.com/search?s={query}",
-    "Robolink": "https://www.robolinkmarket.com/?search_provider=aisearch&query={query}&page=1",
+    "Robolink": "https://www.robolinkmarket.com/arama?q={query}",
     "Robocombo": "https://www.robocombo.com/Arama?1&kelime={query}",
     "Kartal Otomasyon": "https://www.kartalotomasyon.com.tr/arama/{query}",
     "F1 Depo": "https://www.f1depo.com/arama/{query}",
