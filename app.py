@@ -9,13 +9,19 @@ st.set_page_config(page_title="Debug Snapshots Viewer", layout="wide")
 st.title("Debug Snapshots Viewer")
 
 st.sidebar.header("Load snapshots")
-load_mode = st.sidebar.radio("Source", ["Upload file", "Fetch URL", "Paste JSON"], index=1)
+load_mode = st.sidebar.radio("Source", ["Upload file", "Fetch URL", "Paste JSON", "Example data"], index=1)
+
+# Example sample data
+EXAMPLE_SNAPSHOTS = [
+    {"id": 1, "timestamp": "2026-08-25T12:00:00Z", "user": "tester", "type": "info", "details": {"value": 42}},
+    {"id": 2, "timestamp": "2026-08-25T12:01:00Z", "user": "tester", "type": "error", "details": {"message": "something went wrong"}},
+]
 
 snapshots: List[Any] = []
 error = None
 
 if load_mode == "Upload file":
-    uploaded = st.sidebar.file_uploader("Upload JSON file with snapshots (array)", type=["json"])  
+    uploaded = st.sidebar.file_uploader("Upload JSON file with snapshots (array)", type=["json"])
     if uploaded is not None:
         try:
             data = json.load(uploaded)
@@ -32,7 +38,6 @@ elif load_mode == "Fetch URL":
     url = st.sidebar.text_input("Snapshot JSON URL (must return JSON array)", value="/api/debug_snapshots")
     if st.sidebar.button("Fetch"):
         try:
-            # use urllib to avoid adding new deps; works for http/https
             with urlopen(url) as r:
                 raw = r.read()
                 data = json.loads(raw.decode("utf-8"))
@@ -47,7 +52,7 @@ elif load_mode == "Fetch URL":
         except Exception as e:
             error = f"Failed to fetch/parse JSON: {e}"
 
-else:  # Paste JSON
+elif load_mode == "Paste JSON":
     txt = st.sidebar.text_area("Paste JSON here (array of snapshots)")
     if st.sidebar.button("Load pasted JSON"):
         try:
@@ -61,11 +66,15 @@ else:  # Paste JSON
         except Exception as e:
             error = f"Failed to parse JSON: {e}"
 
+else:  # Example data
+    if st.sidebar.button("Load example snapshots"):
+        snapshots = EXAMPLE_SNAPSHOTS
+
 if error:
     st.sidebar.error(error)
 
 if not snapshots:
-    st.info("No snapshots loaded. Use the sidebar to upload, fetch, or paste snapshots JSON.")
+    st.info("No snapshots loaded. Use the sidebar to upload, fetch, paste, or load example snapshots.")
     st.stop()
 
 # Filtering
@@ -96,11 +105,13 @@ with col1:
         summary = " — " + ", ".join(list(s.keys())[:3]) if isinstance(s, dict) else ""
         options.append(f"{title}{summary}")
 
-    idx = st.selectbox("Select snapshot", list(range(len(filtered))) if filtered else [], format_func=lambda x: options[x] if filtered else "")
+    idx = None
+    if filtered:
+        idx = st.selectbox("Select snapshot", list(range(len(filtered))), format_func=lambda x: options[x])
 
 with col2:
     st.subheader("Snapshot details")
-    if filtered:
+    if filtered and idx is not None:
         sel = filtered[idx]
         st.write("Metadata:")
         if isinstance(sel, dict):
@@ -110,5 +121,5 @@ with col2:
         st.json(sel)
 
 # Optionally allow download
-if st.button("Download shown snapshots as JSON"):
-    st.download_button("Download", data=json.dumps(filtered, indent=2), file_name="debug_snapshots_filtered.json", mime="application/json")
+if filtered:
+    st.download_button("Download shown snapshots as JSON", data=json.dumps(filtered, indent=2), file_name="debug_snapshots_filtered.json", mime="application/json")
