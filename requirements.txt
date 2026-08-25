@@ -1,5 +1,7 @@
-streamlit>=1.40
-curl-cffi>=0.7
-beautifulsoup4>=4.12
-lxml>=5.0
-pytest>=8.0
+streamlit
+selenium
+webdriver-manager
+beautifulsoup4
+lxml
+pandas
+pyvirtualdisplay
