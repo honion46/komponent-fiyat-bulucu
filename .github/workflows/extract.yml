@@ -1,6 +1,9 @@
 name: Extract V2
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -14,19 +17,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract V2
+      - name: Extract V2 ZIP
+        shell: bash
         run: |
           set -e
 
-          ZIP="komponent-fiyat-bulucu-v2.zip"
+          echo "ZIP dosyaları:"
+          find . -maxdepth 2 -type f -name "*.zip" -print
 
-          if [ ! -f "$ZIP" ]; then
-            echo "ZIP bulunamadı: $ZIP"
+          ZIP=$(find . -maxdepth 2 -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$ZIP" ]; then
+            echo "HATA: ZIP dosyası bulunamadı."
             exit 1
           fi
 
+          echo "Bulunan ZIP: $ZIP"
+
           mkdir -p /tmp/v2
           unzip -o "$ZIP" -d /tmp/v2
+
+          echo "ZIP içeriği:"
+          find /tmp/v2 -maxdepth 4 -type f -print
 
           ROOT="/tmp/v2/komponent-fiyat-bulucu-v2"
 
@@ -34,20 +46,27 @@ jobs:
             ROOT="/tmp/v2"
           fi
 
+          echo "Kullanılan kaynak klasör: $ROOT"
+
           cp -r "$ROOT"/. .
 
           rm -f "$ZIP"
 
-          echo "Dosyalar çıkarıldı:"
+          echo "Repo içeriği:"
           find . -maxdepth 4 -type f | sort
 
-      - name: Commit extracted files
+      - name: Commit changes
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add .
-          git diff --cached --quiet && exit 0
+
+          if git diff --cached --quiet; then
+            echo "Commit edilecek değişiklik yok."
+            exit 0
+          fi
 
           git commit -m "Extract V2 price finder"
           git push
