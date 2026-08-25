@@ -1,16 +1,14 @@
 """
-Streamlit UI: Price Finder
+Streamlit UI: Price Finder (extended with Turkey adapters)
 
-- Yapıştırma veya CSV ile SKU listesi alır.
-- Adapter seçeneği: Mock veya Scraper.
-- Sonuçları tablo halinde gösterir; filtreleme, sıralama, CSV indir.
+This version pre-fills URL templates and selectors for several Turkish suppliers (Robotistan, RobotHobi, Hepsiburada, N11).
+These selectors are placeholders and may need correction per site. The UI allows editing the URL template and selector before lookup.
 """
 import streamlit as st
 import pandas as pd
 from typing import List
 from price_finder import MockAdapter, ScraperAdapter, lookup_prices
-import io
-import csv
+from turkiye_adapters import DEFAULTS
 
 st.set_page_config(page_title="Price Finder", layout="wide")
 st.title("Price Finder — Komponent Fiyat Bulucu")
@@ -38,17 +36,29 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.header("Adapter")
-adapter_choice = st.sidebar.selectbox("Adapter", ["Mock", "Scraper"], index=0)
+adapter_choice = st.sidebar.selectbox("Adapter", ["Mock", "Scraper", "Robotistan", "RobotHobi", "Hepsiburada", "N11"], index=0)
 
 adapter = None
+
 if adapter_choice == "Mock":
     adapter = MockAdapter(seed=1)
     st.sidebar.info("Mock adapter returns deterministic example prices for testing.")
-else:
+
+elif adapter_choice == "Scraper":
     st.sidebar.markdown("Scraper configuration")
     url_template = st.sidebar.text_input("URL template (use {sku})", value="https://example.com/search?q={sku}")
     price_selector = st.sidebar.text_input("Price CSS selector (e.g. .price)", value=".price")
     st.sidebar.markdown("If you don't know the selector, use Mock adapter first. Scraping real sites may be blocked or require cookies/JS.")
+    adapter = ScraperAdapter(url_template=url_template, price_css_selector=price_selector)
+
+else:
+    # Turkey-specific presets
+    preset = adapter_choice
+    defaults = DEFAULTS.get(preset, {})
+    st.sidebar.markdown(f"{preset} preset (defaults provided; edit before lookup if needed)")
+    url_template = st.sidebar.text_input("URL template (use {sku})", value=defaults.get("url_template", "https://example.com/search?q={sku}"))
+    price_selector = st.sidebar.text_input("Price CSS selector (e.g. .price)", value=defaults.get("price_selector", ".price"))
+    st.sidebar.markdown("Note: These presets use simple HTML scraping. Many sites use JS rendering or anti-bot measures; in that case, use API adaptors or provide a working selector.")
     adapter = ScraperAdapter(url_template=url_template, price_css_selector=price_selector)
 
 if st.sidebar.button("Lookup prices"):
