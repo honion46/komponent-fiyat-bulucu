@@ -228,16 +228,20 @@ def get_driver():
     return driver
 
 
-def wait_for_real_content(driver, timeout=15):
-    """Sayfada gerçek fiyat metni (TL/₺) görünene kadar bekler (AJAX sonuçlarının dolmasını bekler)."""
+def wait_for_real_content(driver, timeout=15, min_matches=2):
+    """Sayfada gerçek ürün fiyatları görünene kadar bekler.
+    Tek bir eşleşme (kargo bedava banner'ı gibi) yanlış pozitif olabileceği için
+    en az min_matches kadar fiyat deseni arar."""
     js_check = """
     const t = document.body.innerText || '';
-    return /\\d[\\d.,]*\\s*(TL|₺)/.test(t);
+    const matches = t.match(/\\d[\\d.,]*\\s*(TL|₺)/g) || [];
+    return matches.length;
     """
     end_time = time.time() + timeout
     while time.time() < end_time:
         try:
-            if driver.execute_script(js_check):
+            count = driver.execute_script(js_check)
+            if count and count >= min_matches:
                 return True
         except Exception:
             pass
@@ -304,7 +308,7 @@ def scrape_site(site: str, url_tmpl: str, query: str):
             except Exception:
                 pass
         elif site in SLOW_AJAX_SITES:
-            wait_for_real_content(driver, timeout=15)
+            wait_for_real_content(driver, timeout=20)
         else:
             time.sleep(3.0)
 
