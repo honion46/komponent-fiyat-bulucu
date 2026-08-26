@@ -1,7 +1,2 @@
-app.py
-requirements.txt
-src/
-tests/
 chromium
 chromium-driver
-xvfb
