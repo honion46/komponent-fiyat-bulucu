@@ -1,3 +1,38 @@
+import os
+import subprocess
+import streamlit as st
+
+st.title("🔧 Chrome / ChromeDriver Test")
+
+for command in [
+    ["which", "chromium"],
+    ["which", "chromedriver"],
+    ["chromium", "--version"],
+    ["chromedriver", "--version"],
+]:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        st.code(
+            "$ " + " ".join(command)
+            + "\n"
+            + result.stdout
+            + result.stderr
+        )
+
+    except Exception as e:
+        st.error(f"{command}: {e}")
+
+st.write("Chromium:")
+st.write(os.path.exists("/usr/bin/chromium"))
+
+st.write("ChromeDriver:")
+st.write(os.path.exists("/usr/bin/chromedriver"))
 import concurrent.futures
 import json
 import os
