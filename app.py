@@ -31,6 +31,8 @@ SEARCH_URL_TEMPLATES = {
     "Görsu Elektronik": "https://gorsuelektronik.com/arama?q={query}",
     "Robot Sepeti": "https://www.robotsepeti.com/arama?q={query}",
     "Robo90": "https://www.robo90.com/arama?q={query}",
+    "Direnc.net": "https://www.direnc.net/arama?q={query}",
+    "E-Komponent": "https://www.e-komponent.com/arama?q={query}",
 }
 
 # Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
@@ -714,7 +716,7 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
 def search_all_selenium(query: str):
     clean_query, quantity = parse_query_quantity(query)
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(scrape_site, site, tmpl, clean_query): site
             for site, tmpl in SEARCH_URL_TEMPLATES.items()
@@ -767,8 +769,14 @@ def build_basket_comparison(items: list[str], all_results: dict) -> dict:
 
 
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-st.title("⚡ Komponent Fiyat Karşılaştırma (Stealth Selenium)")
-st.caption("V1.2 • Daha sıkı komponent eşleşmesi • MPN / paket / üretici ayrımı • Zayıf eşleşme filtresi")
+st.title("⚡ Komponent Fiyat Karşılaştırma")
+st.caption("Türkiye'deki elektronik komponent mağazalarını tek aramada karşılaştır.")
+
+f1, f2, f3, f4 = st.columns(4)
+f1.metric("🏪 Mağaza", len(SEARCH_URL_TEMPLATES))
+f2.metric("🎯 Eşleşme", "Akıllı")
+f3.metric("📦 Stok", "Kontrol")
+f4.metric("💰 Fiyat", "Karşılaştır")
 
 tab_single, tab_basket = st.tabs(["🔍 Tek Ürün", "🛒 Sepet Karşılaştırma"])
 
@@ -779,8 +787,18 @@ with tab_single:
         if not query.strip():
             st.warning("Lütfen bir ürün adı girin.")
         else:
-            with st.spinner(f"{len(SEARCH_URL_TEMPLATES)} site aranıyor (15-30sn sürebilir)..."):
+            search_status = st.empty()
+            search_status.markdown(
+                "### 🔎 Mağazalar taranıyor...\n"
+                "Ürünleri, fiyatları ve stok bilgilerini karşılaştırıyorum."
+            )
+
+            # Küçük bir animasyon hissi: teknik bekleme mesajı yerine kullanıcıya
+            # ne yapıldığını göster.
+            with st.spinner("⚡ Fiyatlar karşılaştırılıyor..."):
                 site_results = search_all_selenium(query)
+
+            search_status.success("✅ Tarama tamamlandı — en uygun sonuçlar hazırlanıyor.")
 
             with st.expander("🔍 Site Tarama Durumları", expanded=False):
                 for site, prods, status, debug_png, debug_html in site_results:
@@ -796,25 +814,6 @@ with tab_single:
                         st.success(f"**{site}:** {status}")
 
             all_products = [p for _, prods, _, _, _ in site_results for p in prods]
-
-            # V1.2: zayıf eşleşmeleri kullanıcı isterse gizleyebilir.
-            min_score = st.slider(
-                "Minimum eşleşme güveni",
-                min_value=0,
-                max_value=100,
-                value=40,
-                step=5,
-                help="Düşük puanlı benzer ama yanlış komponentleri sonuçlardan çıkarır.",
-            )
-            filtered_products = [p for p in all_products if p.match_score >= min_score]
-
-            if not filtered_products and all_products:
-                st.warning(
-                    f"%{min_score} altındaki eşleşmeler filtrelendi. "
-                    "Minimum güveni düşürerek diğer sonuçları görebilirsiniz."
-                )
-
-            all_products = filtered_products
 
             if not all_products:
                 st.error("Hiçbir sitede sonuç bulunamadı.")
@@ -860,7 +859,11 @@ with tab_basket:
         if not items:
             st.warning("Lütfen en az bir ürün girin.")
         else:
-            progress_bar = st.progress(0, text="Başlıyor...")
+            st.info(
+                f"🛒 {len(items)} ürün için mağaza fiyatları karşılaştırılıyor. "
+                "Sonuçlar tamamlandıkça toplam sepet maliyeti hesaplanacak."
+            )
+            progress_bar = st.progress(0, text="Sepet hazırlanıyor...")
 
             def _update_progress(idx, item):
                 progress_bar.progress(
