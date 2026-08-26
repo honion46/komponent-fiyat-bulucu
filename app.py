@@ -331,6 +331,58 @@ def enrich_product(product: Product, query: str, source_text: str = "") -> Produ
     return product
 
 
+
+def enrich_products_from_detail(driver, products: list[Product], query: str, max_details: int = 6) -> list[Product]:
+    """Arama sonucundaki ürün linklerini sınırlı sayıda ürün sayfasında doğrular. Özellikle 'Tükendi / Gelince Haber Ver / Sepete Ekle' gibi gerçek stok durumları ürün kartında görünmüyorsa ürün sayfasından okunur."""
+    if not products:
+        return products
+
+    checked = 0
+    for product in products:
+        if checked >= max_details:
+            break
+
+        # Zaten kesin stok bilgisi varsa tekrar sayfaya gitme.
+        if product.stock in ("Var", "Yok"):
+            continue
+
+        if not product.url:
+            continue
+
+        try:
+            driver.get(product.url)
+            time.sleep(0.7)
+
+            body_text = driver.execute_script(
+                "return document.body ? (document.body.innerText || '') : '';"
+            )
+
+            if not body_text:
+                continue
+
+            # Stok bilgisini gerçek ürün sayfasından al.
+            product.stock = detect_stock(body_text)
+
+            # Ürün sayfasında MPN/paket bilgisi varsa tamamla.
+            if not product.mpn:
+                product.mpn = extract_mpn(body_text)
+
+            # Arama sonucunda fiyat yoksa ürün sayfasındaki ilk gerçek TL fiyatını dene.
+            if product.price is None:
+                price_match = PRICE_RE.search(body_text)
+                if price_match:
+                    product.price = parse_price(price_match.group(1))
+
+            enrich_product(product, query, body_text)
+            checked += 1
+
+        except Exception:
+            # Kullanıcıya teknik hata göstermiyoruz; mevcut sonuç aynen kalır.
+            continue
+
+    return products
+
+
 def extract_products(html: str, base_url: str, site_name: str, query: str) -> list[Product]:
     soup = BeautifulSoup(html, "lxml")
     keywords = [k.lower() for k in query.split() if len(k) > 1]
@@ -670,56 +722,16 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
         html = driver.page_source
         products = extract_products(html, base_url, site, query)
 
+        # Ürün kartında stok görünmüyorsa gerçek ürün sayfasından doğrula.
+        # En fazla 6 ürün/site kontrol edilir; böylece tarama süresi aşırı uzamaz.
+        if products:
+            products = enrich_products_from_detail(
+                driver, products, query, max_details=6
+            )
+
+        # Debug çıktıları tamamen kapalı.
         debug_png = None
         debug_html_snippet = None
-        if not products:
-            try:
-                debug_png = driver.get_screenshot_as_png()
-            except Exception:
-                pass
-            try:
-                body_text = driver.execute_script("return document.body.innerText || '';")
-            except Exception:
-                body_text = ""
-            price_matches = len(re.findall(r"\d[\d.,]*\s*(?:TL|₺)", body_text))
-
-            # Gerçek bir ürün adını bul (banner değil): body_text'te bir satırın
-            # hemen ardından fiyat satırı geliyorsa, o satır muhtemelen ürün adıdır.
-            raw_html_snippet = ""
-            body_lines = [ln.strip() for ln in body_text.split("\n") if ln.strip()]
-            price_line_re = re.compile(r"^\d[\d.,]*\s*(?:TL|₺)$", re.IGNORECASE)
-            candidate_name_line = None
-            for idx in range(len(body_lines) - 1):
-                if price_line_re.match(body_lines[idx + 1]) and len(body_lines[idx]) > 8 and not price_line_re.match(body_lines[idx]):
-                    candidate_name_line = body_lines[idx]
-                    break
-
-            if candidate_name_line:
-                pos = html.find(candidate_name_line)
-                if pos == -1:
-                    # HTML entity kaçışları yüzünden bulunamadıysa ilk birkaç kelimeyi dene
-                    first_word = candidate_name_line.split(" ")[0]
-                    pos = html.find(first_word)
-                if pos != -1:
-                    start = max(0, pos - 1000)
-                    end = min(len(html), pos + 800)
-                    raw_html_snippet = html[start:end]
-
-            if not raw_html_snippet:
-                m = re.search(r"\d[\d.,]*\s*(?:TL|₺)", html)
-                if m:
-                    start = max(0, m.start() - 1200)
-                    end = min(len(html), m.end() + 300)
-                    raw_html_snippet = html[start:end]
-
-            debug_html_snippet = (
-                f"[TOPLAM HTML UZUNLUĞU: {len(html)} karakter]\n"
-                f"[GÖRÜNÜR METİNDE FİYAT DESENİ SAYISI: {price_matches}]\n\n"
-                f"--- GÖRÜNÜR SAYFA METNİ (ilk 2500 karakter) ---\n"
-                f"{body_text[:2500]}\n\n"
-                f"--- İLK FİYATIN ETRAFINDAKİ HAM HTML ---\n"
-                f"{raw_html_snippet}"
-            )
 
         status = f"{len(products)} ürün bulundu" if products else "Ürün bulunamadı"
         return site, products, status, debug_png, debug_html_snippet
@@ -790,13 +802,6 @@ def build_basket_comparison(items: list[str], all_results: dict) -> dict:
 
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
 st.title("⚡ Komponent Fiyat Karşılaştırma")
-st.caption("Türkiye'deki elektronik komponent mağazalarını tek aramada karşılaştır.")
-
-f1, f2, f3, f4 = st.columns(4)
-f1.metric("🏪 Mağaza", len(SEARCH_URL_TEMPLATES))
-f2.metric("🎯 Eşleşme", "Akıllı")
-f3.metric("📦 Stok", "Kontrol")
-f4.metric("💰 Fiyat", "Karşılaştır")
 
 tab_single, tab_basket = st.tabs(["🔍 Tek Ürün", "🛒 Sepet Karşılaştırma"])
 
@@ -821,17 +826,14 @@ with tab_single:
             search_status.success("✅ Tarama tamamlandı — en uygun sonuçlar hazırlanıyor.")
 
             with st.expander("🔍 Site Tarama Durumları", expanded=False):
-                for site, prods, status, debug_png, debug_html in site_results:
-                    if "Hata" in status or "Engellendi" in status:
-                        st.error(f"**{site}:** {status}")
-                    elif "bulunamadı" in status:
-                        st.warning(f"**{site}:** {status}")
-                        if debug_png:
-                            st.image(debug_png, caption=f"{site} - o an görünen sayfa", width=400)
-                        if debug_html:
-                            st.code(debug_html, language="html")
+                cols = st.columns(3)
+                for idx, (site, prods, _status, _debug_png, _debug_html) in enumerate(site_results):
+                    col = cols[idx % 3]
+                    if prods:
+                        col.success(f"**{site}** — bulundu")
                     else:
-                        st.success(f"**{site}:** {status}")
+                        col.info(f"**{site}** — bulunamadı")
+
 
             all_products = [p for _, prods, _, _, _ in site_results for p in prods]
 
