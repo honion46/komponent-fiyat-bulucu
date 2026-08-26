@@ -608,8 +608,6 @@ def get_driver(stealth: bool = False):
 
     display_ready = False
     if stealth:
-        # Cloudflare gibi gelişmiş bot tespiti olan siteler için:
-        # headless kapalı + sanal ekran (Xvfb) kullan, daha fazla iz gizle.
         if _virtual_display is None:
             try:
                 from pyvirtualdisplay import Display
@@ -617,23 +615,17 @@ def get_driver(stealth: bool = False):
                 _virtual_display.start()
                 display_ready = True
             except Exception:
-                _virtual_display = False  # tekrar denemesin
+                _virtual_display = False
         elif _virtual_display is not False:
             display_ready = True
 
     if not display_ready:
-        # Sanal ekran yoksa (kurulamadıysa) güvenli şekilde headless kullan
         options.add_argument("--headless=new")
 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-sync")
-    options.add_argument("--disable-default-apps")
-    options.add_argument("--no-first-run")
-    options.add_argument("--window-size=1280,720")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--lang=tr-TR")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -643,7 +635,11 @@ def get_driver(stealth: bool = False):
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 
-    binary_candidates = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
+    binary_candidates = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+    ]
     for path in binary_candidates:
         if os.path.exists(path):
             options.binary_location = path
@@ -657,14 +653,16 @@ def get_driver(stealth: bool = False):
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
         except Exception:
-            # Son çare: stealth/görünür mod hiç çalışmadıysa zorla headless dene
             if "--headless=new" not in options.arguments:
                 options.add_argument("--headless=new")
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
 
     stealth_js = """ Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]}); Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']}); window.chrome = { runtime: {} }; const originalQuery = window.navigator.permissions.query; window.navigator.permissions.query = (parameters) => ( parameters.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(parameters) ); """
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": stealth_js},
+    )
     return driver
 
 
@@ -769,7 +767,7 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
 def search_all_selenium_live(query: str):
     """Siteleri paralel tarar ve her site tamamlandığında sonucu anında verir."""
     clean_query, quantity = parse_query_quantity(query)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(scrape_site, site, tmpl, clean_query): site
             for site, tmpl in SEARCH_URL_TEMPLATES.items()
@@ -782,8 +780,14 @@ def search_all_selenium_live(query: str):
                     product.quantity = quantity
                     enrich_product(product, clean_query, product.name)
                 yield (site, products, status, debug_png, debug_html)
-            except Exception:
-                yield (site_name, [], "Ürün bulunamadı", None, None)
+            except Exception as exc:
+                yield (
+                    site_name,
+                    [],
+                    f"Bağlantı Hatası / Engellendi ({exc.__class__.__name__})",
+                    None,
+                    None,
+                )
 
 
 def search_all_selenium(query: str):
