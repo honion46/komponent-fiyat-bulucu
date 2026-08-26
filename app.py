@@ -28,8 +28,20 @@ SEARCH_URL_TEMPLATES={
 SLOW_AJAX_SITES={"Robolink","Motorobit"}; CLOUDFLARE_SITES=set(); SITE_WAIT_SELECTORS={}
 PRICE_RE=re.compile(r"([\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺|TRY)",re.I)
 NUM_ONLY_RE=re.compile(r"^[\d.,]+$")
-OUT_TERMS=("gelince haber ver","tükendi","stokta yok","stok yok","stok : yok","stok: yok","stokta bulunmuyor","temin edilemiyor","satışa kapalı","ürün tükendi")
-IN_TERMS=("sepete ekle","satın al","hemen al","şimdi al")
+OUT_TERMS=(
+    "gelince haber ver","gelince haber veriniz","tükendi",
+    "stokta yok","stokta yoktur","stok yok","stok : yok","stok: yok",
+    "stokta bulunmuyor","stokta bulunmamaktadır",
+    "stokta mevcut değil","stokta mevcut değildir",
+    "stok dışı","stok disi","temin edilemiyor",
+    "satışa kapalı","satişa kapalı","ürün tükendi",
+    "stokta yok!"
+)
+IN_TERMS=(
+    "sepete ekle","sepete ekle!","sepete ekleyin",
+    "satın al","hemen al","şimdi al","stokta",
+    "stokta var","stokta mevcut","stoklarımızda"
+)
 IGNORE={"add to cart","sepete ekle","favorilere ekle","incele","tümü","detay","giriş yap","üye ol","sipariş takibi","iletişim","kategoriler","yardım","hesabım","sepetim","müşteri hizmetleri","satış yap"}
 
 @dataclass
@@ -105,10 +117,65 @@ def jsonld(soup,site,keys):
         seen.add(url); out.append(Product(site,name,price,url,stock))
     return out
 
+def enrich_jsonld_stock_from_cards(soup, products):
+    """JSON-LD ürünlerinde stok unknown ise aynı ürün kartının görünür metninden stok durumunu tamamlar. Birçok mağaza ürün/fiyat bilgisini JSON-LD'de verirken 'Sepete Ekle' veya 'Stokta Yok' bilgisini HTML ürün kartında tutuyor. """
+    for p in products:
+        if p.stock != "unknown":
+            continue
+
+        try:
+            target = p.url.rstrip("/")
+
+            anchors = soup.find_all("a", href=True)
+            for a in anchors:
+                href = a.get("href", "")
+                full = href if href.startswith("http") else (
+                    "https://" + href.lstrip("/")
+                    if href.startswith("//") else href
+                )
+
+                # URL'nin son kısmını karşılaştır; izleme parametrelerini yok say.
+                if not full.rstrip("/").split("?")[0].endswith(
+                    target.split("?")[0].rstrip("/").split("/")[-1]
+                ):
+                    continue
+
+                # Ürün kartı olabilecek en yakın üst elemanları kontrol et.
+                node = a
+                for _ in range(6):
+                    node = getattr(node, "parent", None)
+                    if node is None:
+                        break
+
+                    text = node.get_text(" ", strip=True)
+                    if not text:
+                        continue
+
+                    low = re.sub(r"\s+", " ", text.lower()).strip()
+
+                    # Negatif ifade her zaman pozitif ifadeden önce.
+                    if any(x in low for x in OUT_TERMS):
+                        p.stock = "out"
+                        break
+
+                    if any(x in low for x in IN_TERMS):
+                        p.stock = "in"
+                        break
+
+                if p.stock != "unknown":
+                    break
+
+        except Exception:
+            pass
+
+    return products
+
+
 def extract(html,base,site,query):
     soup=BeautifulSoup(html,"lxml"); keys=[x.lower() for x in query.split() if len(x)>1]
     j=jsonld(soup,site,keys)
-    if j:return j
+    if j:
+        return enrich_jsonld_stock_from_cards(soup, j)
     for tag in soup(["script","style","nav","footer","header","noscript","aside"]): tag.decompose()
     out=[]; seen=set()
     def clean(t):
@@ -185,30 +252,39 @@ def cookies(d):
     except:pass
 
 
-def refine_product_stocks(driver, products, site, limit=12):
-    """Arama kartında stok bilgisi belirsizse ürün sayfasını kontrol eder. Özellikle F1 Depo ve Robotzade gibi sitelerde JSON-LD stok bilgisi verilmediğinde gerçek buton/metin üzerinden karar verir. """
-    if site not in {"F1 Depo", "Robotzade"}:
-        return products
+def detect_product_page_stock(driver, site):
+    """Ürün sayfasındaki gerçek stok/satın alma durumunu belirler. Öncelik: 1. Ürün satın alma alanındaki görünür buton/metin 2. Açık stok mesajı 3. JSON-LD availability 4. Sayfa metni """
+    try:
+        js = r""" const norm = s => (s || '') .replace(/\s+/g, ' ') .trim() .toLocaleLowerCase('tr-TR'); const visible = el => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el); return !!(r.width && r.height && st.display !== 'none' && st.visibility !== 'hidden'); }; const positive = [ 'sepete ekle', 'sepete ekle!', 'satın al', 'hemen al', 'şimdi al', 'add to cart', 'buy now', 'stokta', 'stokta var', 'stokta mevcut' ]; const negative = [ 'gelince haber ver', 'gelince haber veriniz', 'tükendi', 'stokta yok', 'stokta yoktur', 'stok yok', 'stok : yok', 'stok: yok', 'stokta bulunmuyor', 'stokta bulunmamaktadır', 'stokta mevcut değil', 'stokta mevcut değildir', 'stok dışı', 'stok disi', 'temin edilemiyor', 'satışa kapalı', 'ürün tükendi' ]; // Ürün satın alma alanlarını özellikle ara. const selectors = [ 'form[action*="cart" i]', 'form[action*="sepet" i]', '.product-detail', '.product-detail-container', '.product-info', '.product-content', '.product-actions', '.product-buttons', '.add-to-cart', '#product', '[class*="product-detail" i]', '[class*="product-info" i]', '[class*="product-action" i]', '[class*="add-to-cart" i]', '[id*="product" i]' ]; const areas = []; for (const sel of selectors) { try { document.querySelectorAll(sel).forEach(el => { if (visible(el)) areas.push(el); }); } catch (_) {} } // Önce en küçük alanlarda karar ver. for (const area of areas) { const t = norm(area.innerText || ''); if (!t) continue; if (negative.some(x => t.includes(x))) return 'out'; const buttons = [ ...area.querySelectorAll( 'button, input[type="button"], input[type="submit"], ' + 'a[role="button"], [role="button"]' ) ].filter(visible); const bt = buttons.map(el => norm(el.innerText || el.value || el.getAttribute('aria-label')) ).filter(Boolean); if (bt.some(x => negative.some(n => x.includes(n)))) return 'out'; if (bt.some(x => positive.some(n => x.includes(n)))) return 'in'; if (positive.some(x => t.includes(x))) return 'in'; } // Genel görünür butonlar: footer/header'daki sahte "sepete ekle" // ifadelerinden önce açık stok mesajlarını kontrol et. const body = norm(document.body ? document.body.innerText : ''); if (negative.some(x => body.includes(x))) return 'out'; const buttons = [ ...document.querySelectorAll( 'button, input[type="button"], input[type="submit"], ' + 'a[role="button"], [role="button"]' ) ].filter(visible); const bt = buttons.map(el => norm(el.innerText || el.value || el.getAttribute('aria-label')) ).filter(Boolean); if (bt.some(x => negative.some(n => x.includes(n)))) return 'out'; if (bt.some(x => positive.some(n => x.includes(n)))) return 'in'; // JSON-LD availability for (const script of document.querySelectorAll( 'script[type="application/ld+json"]' )) { try { const raw = JSON.parse(script.textContent || '{}'); const stack = Array.isArray(raw) ? [...raw] : [raw]; while (stack.length) { const obj = stack.pop(); if (!obj || typeof obj !== 'object') continue; const av = obj.availability; if (typeof av === 'string') { const a = av.toLowerCase(); if (a.includes('outofstock') || a.includes('soldout')) return 'out'; if (a.includes('instock') || a.includes('limitedavailability') || a.includes('preorder')) return 'in'; } for (const v of Object.values(obj)) { if (v && typeof v === 'object') stack.push(v); } } } catch (_) {} } if (positive.some(x => body.includes(x))) return 'in'; return 'unknown'; """
 
+        return driver.execute_script(js) or "unknown"
+    except Exception:
+        return "unknown"
+
+def refine_product_stocks(driver, products, site, limit=4):
+    """Arama sonucunda stok bilinmiyorsa ürün sayfasından kesinleştirir. Artık sadece F1 Depo/Robotzade değil; Elektrodepo, Komponentci ve diğer mağazalar da desteklenir. Arama kartı/JSON-LD zaten kesin bilgi verdiyse ürün sayfasına gidilmez. """
     checked = 0
+
     for p in products:
-        if p.stock != "unknown" or checked >= limit:
+        if checked >= limit:
+            break
+
+        if p.stock != "unknown":
             continue
 
         try:
             driver.set_page_load_timeout(12)
             driver.get(p.url)
-            time.sleep(0.45)
-            text = driver.execute_script(
-                "return document.body ? document.body.innerText : '';"
-            )
-            detected = stock_of(text)
-            if detected != "unknown":
+            time.sleep(0.55)
+
+            detected = detect_product_page_stock(driver, site)
+
+            if detected in {"in", "out"}:
                 p.stock = detected
+
             checked += 1
         except Exception:
             checked += 1
-            continue
 
     return products
 
