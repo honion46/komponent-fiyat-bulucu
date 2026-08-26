@@ -31,8 +31,6 @@ SEARCH_URL_TEMPLATES = {
     "Görsu Elektronik": "https://gorsuelektronik.com/arama?q={query}",
     "Robot Sepeti": "https://www.robotsepeti.com/arama?q={query}",
     "Robo90": "https://www.robo90.com/arama?q={query}",
-    "Direnc.net": "https://www.direnc.net/arama?q={query}",
-    "E-Komponent": "https://www.e-komponent.com/arama?q={query}",
 }
 
 # Bu siteler sonucu AJAX/JS ile geç dolduruyor, standart bekleme yetmiyor
@@ -149,17 +147,39 @@ def parse_query_quantity(query: str) -> tuple[str, int]:
 
 
 def detect_stock(text: str) -> str:
-    t = text.lower()
-    if any(x in t for x in (
-        "stokta yok", "stok dışı", "tükendi",
-        "stokta bulunmuyor", "satışta değil"
-    )):
+    """Ürün sayfasındaki satın alma davranışına göre stok durumunu belirler. Sepete ekle/satın al varsa stokta; gelince haber ver/tükendi vb. varsa yok."""
+    t = (text or "").lower()
+
+    # Kesin stok dışı ifadeleri önce kontrol et.
+    out_of_stock = (
+        "gelince haber ver",
+        "stokta yok",
+        "stok dışı",
+        "stok disi",
+        "tükendi",
+        "tukendi",
+        "stokta bulunmuyor",
+        "stokta bulunmamaktadır",
+        "satışta değil",
+        "satisda degil",
+        "ön sipariş",
+        "on siparis",
+    )
+    if any(x in t for x in out_of_stock):
         return "Yok"
-    if any(x in t for x in (
-        "sepete ekle", "stokta", "hemen al",
-        "stok adedi", "stok miktarı"
-    )):
+
+    # Satın alma aksiyonu varsa ürün alınabilir/stokta kabul edilir.
+    in_stock = (
+        "sepete ekle",
+        "satın al",
+        "satınalma",
+        "hemen al",
+        "sipariş ver",
+        "siparis ver",
+    )
+    if any(x in t for x in in_stock):
         return "Var"
+
     return "Bilinmiyor"
 
 
@@ -790,7 +810,7 @@ with tab_single:
             search_status = st.empty()
             search_status.markdown(
                 "### 🔎 Mağazalar taranıyor...\n"
-                "Ürünleri, fiyatları ve stok bilgilerini karşılaştırıyorum."
+                "Ürünleri, fiyatları ve stok durumlarını karşılaştırıyorum."
             )
 
             # Küçük bir animasyon hissi: teknik bekleme mesajı yerine kullanıcıya
@@ -937,4 +957,21 @@ with tab_basket:
                             use_container_width=True,
                         )
                     else:
-                        st.caption("Hiçbir sitede bulunamadı.")
+                        st.caption("Hiçbir sitede bulunamadı.")        # Kullanıcıya yalnızca sade tarama sonucu göster.
+        found_count = sum(1 for _, prods, _, _, _ in site_results if prods)
+        total_sites = len(SEARCH_URL_TEMPLATES)
+
+        with st.expander("🔍 Site Tarama Durumları", expanded=False):
+            cols = st.columns(3)
+            for idx, (site, prods, status, _debug_png, _debug_html) in enumerate(site_results):
+                col = cols[idx % 3]
+                if prods:
+                    col.success(f"**{site}** — bulundu")
+                else:
+                    col.info(f"**{site}** — bulunamadı")
+
+        st.caption(
+            f"🔎 {total_sites} site tarandı • "
+            f"{found_count} sitede bulundu • "
+            f"{total_sites - found_count} sitede bulunamadı"
+        )
