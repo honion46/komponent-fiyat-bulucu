@@ -821,11 +821,6 @@ def build_basket_comparison(items: list[str], all_results: dict) -> dict:
 
 
 st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
-
-st.markdown(
-    """ <style> .main .block-container { padding-top: 1.1rem; padding-bottom: 1rem; max-width: 1400px; } .result-title { font-size: 1.2rem; font-weight: 700; margin: .4rem 0 .7rem; } .stock-badge { display:inline-block; padding:.2rem .6rem; border-radius:.5rem; font-weight:700; font-size:.84rem; } .stock-ok { background:rgba(46,160,67,.20); color:#49d568; border:1px solid rgba(73,213,104,.45); } .stock-no { background:rgba(220,53,69,.20); color:#ff6878; border:1px solid rgba(255,104,120,.45); } .stock-unknown { background:rgba(140,140,140,.16); color:#b9b9b9; border:1px solid rgba(180,180,180,.25); } .price-strong { font-weight:800; white-space:nowrap; } </style> """,
-    unsafe_allow_html=True,
-)
 st.title("⚡ Komponent Fiyat Karşılaştırma")
 
 tab_single, tab_basket = st.tabs(["🔍 Tek Ürün", "🛒 Sepet Karşılaştırma"])
@@ -919,51 +914,24 @@ with tab_single:
                     }
                     for r in all_products
                 ]
-                st.markdown(
-                f'<div class="result-title">🔎 Arama Sonuçları ({len(all_products)})</div>',
-                unsafe_allow_html=True,
-            )
-
-            st.caption(
-                f"🔎 {len(all_products)} sonuç • "
-                f"🟢 {sum(1 for p in all_products if p.stock == 'Var')} stokta • "
-                f"🔴 {sum(1 for p in all_products if p.stock == 'Yok')} stokta yok • "
-                f"⚪ {sum(1 for p in all_products if p.stock == 'Bilinmiyor')} bilinmiyor • "
-                f"💰 {sum(1 for p in all_products if p.price is not None)} fiyat doğrulandı"
-            )
-
-            rows_html = []
-            for idx, r in enumerate(all_products, start=1):
-                if r.stock == "Var":
-                    stock_html = '<span class="stock-badge stock-ok">🟢 Var</span>'
-                elif r.stock == "Yok":
-                    stock_html = '<span class="stock-badge stock-no">🔴 Yok</span>'
-                else:
-                    stock_html = '<span class="stock-badge stock-unknown">⚪ Bilinmiyor</span>'
-
-                price_html = (
-                    f'<span class="price-strong">{r.price:,.2f} TL</span>'
-                    if r.price is not None else "—"
+                df = pd.DataFrame(data)
+                st.dataframe(
+                    df,
+                    column_config={
+                        "Link": st.column_config.LinkColumn(
+                            "Siteye Git",
+                            display_text="🌐 Siteye Git",
+                        )
+                    },
+                    hide_index=True,
+                    use_container_width=True,
                 )
 
-                safe_name = str(r.name).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                safe_site = str(r.site).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                safe_url = str(r.url).replace('"', "&quot;")
 
-                rows_html.append(
-                    f'<tr>'
-                    f'<td>{idx}</td>'
-                    f'<td><b>{safe_site}</b></td>'
-                    f'<td>{safe_name}</td>'
-                    f'<td>{stock_html}</td>'
-                    f'<td>{price_html}</td>'
-                    f'<td><a href="{safe_url}" target="_blank" style="text-decoration:none;font-weight:700;">🌐 Siteye Git</a></td>'
-                    f'</tr>'
-                )
-
-            table_html = """ <div style="overflow-x:auto;"> <table style="width:100%;border-collapse:collapse;"> <thead> <tr> <th style="text-align:left;padding:.55rem;">#</th> <th style="text-align:left;padding:.55rem;">Mağaza</th> <th style="text-align:left;padding:.55rem;">Ürün</th> <th style="text-align:left;padding:.55rem;">Stok</th> <th style="text-align:left;padding:.55rem;">Fiyat</th> <th style="text-align:left;padding:.55rem;">Bağlantı</th> </tr> </thead> <tbody> """ + "".join(rows_html) + """ </tbody> </table> </div> """
-            st.markdown(table_html, unsafe_allow_html=True)
-
+st.markdown(
+    """ <div style="text-align:center; margin-top:2rem; padding:0.8rem 0; color:#888; font-size:0.85rem;"> ⚡ Komponent Fiyat Karşılaştırma<br> <strong>Mehmet Özberk</strong> </div> """,
+    unsafe_allow_html=True,
+)
 
 with tab_basket:
     st.caption("Her satıra bir ürün yazın. Her ürün tüm sitelerde aranıp, hangi sitenin sepetin tamamını en ucuza karşıladığı hesaplanır.")
