@@ -177,15 +177,34 @@ def scrape(site,tpl,query):
                 try:d.quit()
                 except:pass
 
-def search_all(query):
+def search_all(query, progress_callback=None):
+    results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        fs=[ex.submit(scrape,s,t,query) for s,t in SEARCH_URL_TEMPLATES.items()]
-        return [f.result() for f in concurrent.futures.as_completed(fs)]
+        fs = {
+            ex.submit(scrape, s, t, query): s
+            for s, t in SEARCH_URL_TEMPLATES.items()
+        }
+        done = 0
+        for f in concurrent.futures.as_completed(fs):
+            site = fs[f]
+            done += 1
+            try:
+                result = f.result()
+                results.append(result)
+                found = bool(result[1])
+            except Exception:
+                result = (site, [], "bulunamadı", None, None)
+                results.append(result)
+                found = False
+            if progress_callback:
+                progress_callback(done, len(fs), site, found)
+    return results
+
 
 def stock_badge(s):return "🟢 Var" if s=="in" else "🔴 Yok" if s=="out" else "⚪ Bilinmiyor"
 
 st.set_page_config(page_title="Komponent Fiyat Karşılaştırma",page_icon="⚡",layout="wide")
-st.markdown("""<style>.block-container{padding-top:.7rem;padding-bottom:.7rem;max-width:850px}.small{font-size:.75rem;color:#888}.price{font-weight:800;white-space:nowrap}</style>""",unsafe_allow_html=True)
+st.markdown("""<style> .block-container{padding-top:.55rem;padding-bottom:.55rem;max-width:900px} .small{font-size:.74rem;color:#888} .price{font-weight:800;white-space:nowrap} .result-table{width:100%;border-collapse:collapse;font-size:.78rem} .result-table th{color:#999;text-align:left;padding:7px 5px;border-bottom:1px solid #444;white-space:nowrap} .result-table td{padding:7px 5px;border-bottom:1px solid #292929;vertical-align:middle} .result-table .name{min-width:150px} .result-table .store{font-weight:700;white-space:nowrap} .result-table .go{color:#42b8ff;text-decoration:none;font-weight:700;white-space:nowrap} .result-table .stock{white-space:nowrap} </style>""",unsafe_allow_html=True)
 st.title("⚡ Komponent Fiyat Karşılaştırma")
 t1,t2=st.tabs(["🔍 Tek Ürün","🛒 Sepet Karşılaştırma"])
 
@@ -195,7 +214,31 @@ with t1:
         if not q.strip():st.warning("Lütfen bir ürün adı girin.")
         else:
             start=time.time()
-            with st.spinner("🔎 Mağazalar taranıyor..."): results=search_all(q)
+
+            scan_box = st.empty()
+            scan_state = {site: "⏳" for site in SEARCH_URL_TEMPLATES}
+
+            def update_scan(done, total, site, found):
+                scan_state[site] = "🟢" if found else "⚪"
+                chips = " ".join(
+                    f"{icon} {name}"
+                    for name, icon in scan_state.items()
+                )
+                scan_box.info(
+                    f"📡 **Canlı tarama — {done}/{total} site tamamlandı**\n\n{chips}"
+                )
+
+            scan_box.info(
+                "📡 **Canlı tarama başlıyor...**\n\n"
+                + " ".join(
+                    f"⏳ {site}"
+                    for site in SEARCH_URL_TEMPLATES
+                )
+            )
+
+            results = search_all(q, progress_callback=update_scan)
+            scan_box.empty()
+
             products=[p for _,ps,_,_,_ in results for p in ps]
             # Gerçek sayısal sıralama: 14,21 < 23,60 < 115,44
             products.sort(key=lambda p:(p.price is None,p.price if p.price is not None else float("inf")))
@@ -211,18 +254,29 @@ with t1:
             else:
                 st.subheader(f"🔎 Arama Sonuçları ({len(products)})")
                 cheapest=next((p for p in products if p.price is not None),None)
+
+                rows=[]
                 for p in products:
-                    a,b=st.columns([5.8,2.1])
-                    with a:
-                        st.markdown(f'<div class="small">🏪 {p.site}</div>',unsafe_allow_html=True)
-                        st.write(p.name[:95]+("..." if len(p.name)>95 else ""))
-                        st.caption(stock_badge(p.stock))
-                    with b:
-                        if p.price is None:st.write("—")
-                        elif cheapest and p.url==cheapest.url:st.markdown(f"🏆 **{p.price:,.2f} TL**")
-                        else:st.markdown(f"**{p.price:,.2f} TL**")
-                        st.link_button("🌐 Siteye Git",p.url,use_container_width=True)
-                    st.divider()
+                    stock=stock_badge(p.stock)
+                    price="—" if p.price is None else f"{p.price:,.2f} TL"
+                    name=(p.name[:85]+"...") if len(p.name)>85 else p.name
+                    rows.append(
+                        f'<tr>'
+                        f'<td class="store">{p.site}</td>'
+                        f'<td class="name">{name}</td>'
+                        f'<td class="stock">{stock}</td>'
+                        f'<td class="price">{price}</td>'
+                        f'<td><a class="go" href="{p.url}" target="_blank">🌐 Siteye Git</a></td>'
+                        f'</tr>'
+                    )
+
+                st.markdown(
+                    '<div style="overflow-x:auto;border:1px solid #333;border-radius:9px">'
+                    '<table class="result-table">'
+                    '<thead><tr><th>Mağaza</th><th>Ürün</th><th>Stok</th><th>Fiyat</th><th>Bağlantı</th></tr></thead>'
+                    '<tbody>'+''.join(rows)+'</tbody></table></div>',
+                    unsafe_allow_html=True
+                )
 
 with t2:
     st.caption("Her satıra bir ürün yaz.")
