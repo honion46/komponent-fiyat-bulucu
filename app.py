@@ -761,28 +761,24 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
                 pass
 
 
-def search_all_selenium_live(query: str):
-    """Siteleri paralel tarar ve her site tamamlandığında sonucu anında verir."""
+def search_all_selenium(query: str):
     clean_query, quantity = parse_query_quantity(query)
+    results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(scrape_site, site, tmpl, clean_query): site
             for site, tmpl in SEARCH_URL_TEMPLATES.items()
         }
         for future in concurrent.futures.as_completed(futures):
-            site_name = futures[future]
             try:
                 site, products, status, debug_png, debug_html = future.result()
                 for product in products:
                     product.quantity = quantity
                     enrich_product(product, clean_query, product.name)
-                yield (site, products, status, debug_png, debug_html)
+                results.append((site, products, status, debug_png, debug_html))
             except Exception:
-                yield (site_name, [], "Ürün bulunamadı", None, None)
-
-
-def search_all_selenium(query: str):
-    return list(search_all_selenium_live(query))
+                pass
+    return results
 
 
 def search_basket(items: list[str], progress_callback=None) -> dict:
@@ -833,54 +829,17 @@ with tab_single:
             st.warning("Lütfen bir ürün adı girin.")
         else:
             search_status = st.empty()
-            live_panel = st.empty()
-            tip_panel = st.empty()
-
-            site_results = []
-            all_products = []
-            site_state = {site: "bekliyor" for site in SEARCH_URL_TEMPLATES}
-            start_time = time.time()
-            tips = [
-                "💡 İpucu: MPN ile arama yapmak benzer ürünleri ayırmayı kolaylaştırır.",
-                "🔎 Fiyat ve stok bilgileri mümkün olduğunca ürün sayfasından doğrulanıyor.",
-                "📦 Stokta olmayan ürünler de listelenir; alternatifleri görebilirsiniz.",
-                "💰 Aynı komponent farklı mağazalarda farklı fiyatlarla satılabilir.",
-            ]
-
-            total_sites = len(SEARCH_URL_TEMPLATES)
             search_status.markdown(
-                f"### 🔎 **{query}** aranıyor\n"
-                "Mağazalar paralel olarak taranıyor..."
+                "### 🔎 Mağazalar taranıyor...\n"
+                "Ürünleri, fiyatları ve stok durumlarını karşılaştırıyorum."
             )
 
-            for completed, result in enumerate(search_all_selenium_live(query), start=1):
-                site, prods, status, debug_png, debug_html = result
-                site_results.append(result)
-                site_state[site] = "bulundu" if prods else "bulunamadı"
-                all_products.extend(prods)
+            # Küçük bir animasyon hissi: teknik bekleme mesajı yerine kullanıcıya
+            # ne yapıldığını göster.
+            with st.spinner("⚡ Fiyatlar karşılaştırılıyor..."):
+                site_results = search_all_selenium(query)
 
-                elapsed = int(time.time() - start_time)
-                status_lines = []
-                for name, state in site_state.items():
-                    if state == "bulundu":
-                        status_lines.append(f"🟢 **{name}** — bulundu")
-                    elif state == "bulunamadı":
-                        status_lines.append(f"⚪ **{name}** — bulunamadı")
-                    else:
-                        status_lines.append(f"⏳ **{name}** — bekliyor")
-
-                live_panel.info(
-                    f"**📡 Canlı tarama — {completed}/{total_sites} site tamamlandı · "
-                    f"⏱️ {elapsed} sn · 📦 {len(all_products)} ürün**\n\n"
-                    + " • ".join(status_lines)
-                )
-                tip_panel.caption(tips[(completed - 1) % len(tips)])
-
-            elapsed = int(time.time() - start_time)
-            search_status.success(
-                f"✅ Tarama tamamlandı — {total_sites} site · "
-                f"{len(all_products)} ürün · {elapsed} saniye"
-            )
+            search_status.success("✅ Tarama tamamlandı — en uygun sonuçlar hazırlanıyor.")
 
             with st.expander("🔍 Site Tarama Durumları", expanded=False):
                 cols = st.columns(3)
@@ -891,6 +850,8 @@ with tab_single:
                     else:
                         col.info(f"**{site}** — bulunamadı")
 
+
+            all_products = [p for _, prods, _, _, _ in site_results for p in prods]
 
             if not all_products:
                 st.error("Hiçbir sitede sonuç bulunamadı.")
@@ -926,12 +887,6 @@ with tab_single:
                     hide_index=True,
                     use_container_width=True,
                 )
-
-
-st.markdown(
-    """ <div style="text-align:center; margin-top:2rem; padding:0.8rem 0; color:#888; font-size:0.85rem;"> ⚡ Komponent Fiyat Karşılaştırma<br> <strong>Mehmet Özberk</strong> </div> """,
-    unsafe_allow_html=True,
-)
 
 with tab_basket:
     st.caption("Her satıra bir ürün yazın. Her ürün tüm sitelerde aranıp, hangi sitenin sepetin tamamını en ucuza karşıladığı hesaplanır.")
