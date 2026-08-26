@@ -339,7 +339,7 @@ def enrich_product(product: Product, query: str, source_text: str = "") -> Produ
 
 
 
-def enrich_products_from_detail(driver, products: list[Product], query: str, max_details: int = 6) -> list[Product]:
+def enrich_products_from_detail(driver, products: list[Product], query: str, max_details: int = 4) -> list[Product]:
     """Arama sonucundaki ürün linklerini sınırlı sayıda ürün sayfasında doğrular. Özellikle 'Tükendi / Gelince Haber Ver / Sepete Ekle' gibi gerçek stok durumları ürün kartında görünmüyorsa ürün sayfasından okunur."""
     if not products:
         return products
@@ -628,7 +628,12 @@ def get_driver(stealth: bool = False):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--no-first-run")
+    options.add_argument("--window-size=1280,720")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--lang=tr-TR")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -742,7 +747,7 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
         # En fazla 6 ürün/site kontrol edilir; böylece tarama süresi aşırı uzamaz.
         if products:
             products = enrich_products_from_detail(
-                driver, products, query, max_details=6
+                driver, products, query, max_details=4
             )
 
         # Debug çıktıları tamamen kapalı.
@@ -764,7 +769,7 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
 def search_all_selenium_live(query: str):
     """Siteleri paralel tarar ve her site tamamlandığında sonucu anında verir."""
     clean_query, quantity = parse_query_quantity(query)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
             executor.submit(scrape_site, site, tmpl, clean_query): site
             for site, tmpl in SEARCH_URL_TEMPLATES.items()
@@ -820,7 +825,7 @@ def build_basket_comparison(items: list[str], all_results: dict) -> dict:
     return comparison
 
 
-st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown(
     """ <style> .main .block-container { padding-top: 1.1rem; padding-bottom: 1rem; max-width: 1400px; } .result-title { font-size: 1.2rem; font-weight: 700; margin: .4rem 0 .7rem; } .stock-badge { display:inline-block; padding:.2rem .6rem; border-radius:.5rem; font-weight:700; font-size:.84rem; } .stock-ok { background:rgba(46,160,67,.20); color:#49d568; border:1px solid rgba(73,213,104,.45); } .stock-no { background:rgba(220,53,69,.20); color:#ff6878; border:1px solid rgba(255,104,120,.45); } .stock-unknown { background:rgba(140,140,140,.16); color:#b9b9b9; border:1px solid rgba(180,180,180,.25); } .price-strong { font-weight:800; white-space:nowrap; } </style> """,
@@ -964,6 +969,12 @@ with tab_single:
             table_html = """ <div style="overflow-x:auto;"> <table style="width:100%;border-collapse:collapse;"> <thead> <tr> <th style="text-align:left;padding:.55rem;">#</th> <th style="text-align:left;padding:.55rem;">Mağaza</th> <th style="text-align:left;padding:.55rem;">Ürün</th> <th style="text-align:left;padding:.55rem;">Stok</th> <th style="text-align:left;padding:.55rem;">Fiyat</th> <th style="text-align:left;padding:.55rem;">Bağlantı</th> </tr> </thead> <tbody> """ + "".join(rows_html) + """ </tbody> </table> </div> """
             st.markdown(table_html, unsafe_allow_html=True)
 
+
+
+st.markdown(
+    """ <div style="text-align:center; margin-top:1.5rem; padding:0.7rem 0; color:#888; font-size:0.82rem;"> ⚡ Komponent Fiyat Karşılaştırma<br> <strong>Mehmet Özberk</strong> </div> """,
+    unsafe_allow_html=True,
+)
 
 with tab_basket:
     st.caption("Her satıra bir ürün yazın. Her ürün tüm sitelerde aranıp, hangi sitenin sepetin tamamını en ucuza karşıladığı hesaplanır.")
