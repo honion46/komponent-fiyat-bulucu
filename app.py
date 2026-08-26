@@ -147,19 +147,24 @@ def parse_query_quantity(query: str) -> tuple[str, int]:
 
 
 def detect_stock(text: str) -> str:
-    """Ürün sayfasındaki satın alma davranışına göre stok durumunu belirler. Sepete ekle/satın al varsa stokta; gelince haber ver/tükendi vb. varsa yok."""
-    t = (text or "").lower()
+    """Ürün sayfasındaki satın alma aksiyonuna göre stok durumunu belirler."""
+    t = re.sub(r"\s+", " ", (text or "").lower()).strip()
 
-    # Kesin stok dışı ifadeleri önce kontrol et.
+    # Stok dışı ifadeler: bunlar satın alma butonundan daha önceliklidir.
     out_of_stock = (
         "gelince haber ver",
+        "gelince haber ver!",
+        "gelince haber veriniz",
         "stokta yok",
+        "stokta mevcut değil",
+        "stokta mevcut degil",
         "stok dışı",
         "stok disi",
         "tükendi",
         "tukendi",
         "stokta bulunmuyor",
         "stokta bulunmamaktadır",
+        "stokta bulunmamaktadir",
         "satışta değil",
         "satisda degil",
         "ön sipariş",
@@ -168,11 +173,13 @@ def detect_stock(text: str) -> str:
     if any(x in t for x in out_of_stock):
         return "Yok"
 
-    # Satın alma aksiyonu varsa ürün alınabilir/stokta kabul edilir.
+    # Satın alma aksiyonu.
     in_stock = (
         "sepete ekle",
         "satın al",
+        "satin al",
         "satınalma",
+        "satin alma",
         "hemen al",
         "sipariş ver",
         "siparis ver",
@@ -351,17 +358,26 @@ def enrich_products_from_detail(driver, products: list[Product], query: str, max
 
         try:
             driver.get(product.url)
-            time.sleep(0.7)
+            # Bazı mağazalarda "Gelince Haber Ver" JS ile sonradan geliyor.
+            time.sleep(1.5)
 
             body_text = driver.execute_script(
                 "return document.body ? (document.body.innerText || '') : '';"
             )
 
-            if not body_text:
+            # Görünür metinde yoksa HTML kaynakta da ara.
+            try:
+                page_source_text = driver.page_source or ""
+            except Exception:
+                page_source_text = ""
+
+            stock_source = f"{body_text} {page_source_text}"
+
+            if not body_text and not page_source_text:
                 continue
 
             # Stok bilgisini gerçek ürün sayfasından al.
-            product.stock = detect_stock(body_text)
+            product.stock = detect_stock(stock_source)
 
             # Ürün sayfasında MPN/paket bilgisi varsa tamamla.
             if not product.mpn:
@@ -846,7 +862,6 @@ with tab_single:
                 data = [
                     {
                         "Site": r.site,
-                        "Eşleşme": f"%{r.match_score}",
                         "Stok": r.stock,
                         "MPN": r.mpn,
                         "Birim Fiyat": f"{r.price:,.2f} TL" if r.price is not None else "—",
@@ -863,7 +878,12 @@ with tab_single:
                 df = pd.DataFrame(data)
                 st.dataframe(
                     df,
-                    column_config={"Link": st.column_config.LinkColumn("Satın Al")},
+                    column_config={
+                        "Link": st.column_config.LinkColumn(
+                            "Siteye Git",
+                            display_text="🌐 Siteye Git",
+                        )
+                    },
                     hide_index=True,
                     use_container_width=True,
                 )
@@ -954,7 +974,12 @@ with tab_basket:
                         item_rows.sort(key=lambda r: float(r["Birim Fiyat"].replace(" TL", "").replace(".", "").replace(",", ".")))
                         st.dataframe(
                             pd.DataFrame(item_rows),
-                            column_config={"Link": st.column_config.LinkColumn("Satın Al")},
+                            column_config={
+                        "Link": st.column_config.LinkColumn(
+                            "Siteye Git",
+                            display_text="🌐 Siteye Git",
+                        )
+                    },
                             hide_index=True,
                             use_container_width=True,
                         )
