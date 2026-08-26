@@ -37,8 +37,38 @@ class Product:
     site:str; name:str; price:float|None; url:str; stock:str="unknown"
 
 def parse_price(s):
-    try:return float(s.strip().replace(".","").replace(",","."))
-    except:return None
+    """Türkçe/İngilizce fiyat biçimlerini güvenli biçimde sayıya çevirir."""
+    try:
+        x = re.sub(r"[^0-9.,]", "", str(s).strip())
+        if not x:
+            return None
+
+        # Hem nokta hem virgül varsa son görülen ayırıcı ondalıktır.
+        if "," in x and "." in x:
+            if x.rfind(",") > x.rfind("."):
+                x = x.replace(".", "").replace(",", ".")
+            else:
+                x = x.replace(",", "")
+
+        # Sadece virgül varsa: 1-2 hane ondalık, 3 hane binlik.
+        elif "," in x:
+            left, right = x.rsplit(",", 1)
+            if len(right) in (1, 2):
+                x = left.replace(",", "") + "." + right
+            else:
+                x = x.replace(",", "")
+
+        # Sadece nokta varsa: 1-2 hane ondalık, 3 hane binlik.
+        elif "." in x:
+            left, right = x.rsplit(".", 1)
+            if len(right) in (1, 2):
+                x = left.replace(".", "") + "." + right
+            else:
+                x = x.replace(".", "")
+
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 def stock_of(text):
     t=re.sub(r"\s+"," ",text.lower()).strip()
@@ -154,6 +184,34 @@ def cookies(d):
     try:d.execute_script(js)
     except:pass
 
+
+def refine_product_stocks(driver, products, site, limit=12):
+    """Arama kartında stok bilgisi belirsizse ürün sayfasını kontrol eder. Özellikle F1 Depo ve Robotzade gibi sitelerde JSON-LD stok bilgisi verilmediğinde gerçek buton/metin üzerinden karar verir. """
+    if site not in {"F1 Depo", "Robotzade"}:
+        return products
+
+    checked = 0
+    for p in products:
+        if p.stock != "unknown" or checked >= limit:
+            continue
+
+        try:
+            driver.set_page_load_timeout(12)
+            driver.get(p.url)
+            time.sleep(0.45)
+            text = driver.execute_script(
+                "return document.body ? document.body.innerText : '';"
+            )
+            detected = stock_of(text)
+            if detected != "unknown":
+                p.stock = detected
+            checked += 1
+        except Exception:
+            checked += 1
+            continue
+
+    return products
+
 def scrape(site,tpl,query):
     for attempt in range(2):
         d=None
@@ -168,6 +226,14 @@ def scrape(site,tpl,query):
             else:time.sleep(3)
             cookies(d); d.execute_script("window.scrollTo(0,document.body.scrollHeight/2)"); time.sleep(1)
             products=extract(d.page_source,base,site,query)
+
+            # F1 Depo / Robotzade: ürün sayfasındaki gerçek stok
+            # butonunu kontrol et. "Gelince Haber Ver" = Yok,
+            # "Sepete Ekle" = Var.
+            products=refine_product_stocks(
+                d, products, site
+            )
+
             return site,products,"bulundu" if products else "bulunamadı",None,None
         except Exception as e:
             result=(site,[],f"hata:{type(e).__name__}",None,None)
