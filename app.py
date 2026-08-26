@@ -339,7 +339,7 @@ def enrich_product(product: Product, query: str, source_text: str = "") -> Produ
 
 
 
-def enrich_products_from_detail(driver, products: list[Product], query: str, max_details: int = 4) -> list[Product]:
+def enrich_products_from_detail(driver, products: list[Product], query: str, max_details: int = 6) -> list[Product]:
     """Arama sonucundaki ürün linklerini sınırlı sayıda ürün sayfasında doğrular. Özellikle 'Tükendi / Gelince Haber Ver / Sepete Ekle' gibi gerçek stok durumları ürün kartında görünmüyorsa ürün sayfasından okunur."""
     if not products:
         return products
@@ -404,7 +404,7 @@ def extract_products(html: str, base_url: str, site_name: str, query: str) -> li
     keywords = [k.lower() for k in query.split() if len(k) > 1]
 
     jsonld_results = extract_products_jsonld(soup, site_name, keywords)
-    if jsonld_results:
+    if jsonld_results and any(p.price is not None for p in jsonld_results):
         for p in jsonld_results:
             p.mpn = extract_mpn(p.name)
             p.stock = detect_stock(p.name)
@@ -628,12 +628,7 @@ def get_driver(stealth: bool = False):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-sync")
-    options.add_argument("--disable-default-apps")
-    options.add_argument("--no-first-run")
-    options.add_argument("--window-size=1280,720")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--lang=tr-TR")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -766,24 +761,28 @@ def _scrape_site_once(site: str, url_tmpl: str, query: str):
                 pass
 
 
-def search_all_selenium(query: str):
+def search_all_selenium_live(query: str):
+    """Siteleri paralel tarar ve her site tamamlandığında sonucu anında verir."""
     clean_query, quantity = parse_query_quantity(query)
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(scrape_site, site, tmpl, clean_query): site
             for site, tmpl in SEARCH_URL_TEMPLATES.items()
         }
         for future in concurrent.futures.as_completed(futures):
+            site_name = futures[future]
             try:
                 site, products, status, debug_png, debug_html = future.result()
                 for product in products:
                     product.quantity = quantity
                     enrich_product(product, clean_query, product.name)
-                results.append((site, products, status, debug_png, debug_html))
+                yield (site, products, status, debug_png, debug_html)
             except Exception:
-                pass
-    return results
+                yield (site_name, [], "Ürün bulunamadı", None, None)
+
+
+def search_all_selenium(query: str):
+    return list(search_all_selenium_live(query))
 
 
 def search_basket(items: list[str], progress_callback=None) -> dict:
@@ -821,7 +820,7 @@ def build_basket_comparison(items: list[str], all_results: dict) -> dict:
     return comparison
 
 
-st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Komponent Fiyat Arama", page_icon="⚡", layout="wide")
 
 st.markdown(
     """ <style> .main .block-container { padding-top: 1.1rem; padding-bottom: 1rem; max-width: 1400px; } .result-title { font-size: 1.2rem; font-weight: 700; margin: .4rem 0 .7rem; } .stock-badge { display:inline-block; padding:.2rem .6rem; border-radius:.5rem; font-weight:700; font-size:.84rem; } .stock-ok { background:rgba(46,160,67,.20); color:#49d568; border:1px solid rgba(73,213,104,.45); } .stock-no { background:rgba(220,53,69,.20); color:#ff6878; border:1px solid rgba(255,104,120,.45); } .stock-unknown { background:rgba(140,140,140,.16); color:#b9b9b9; border:1px solid rgba(180,180,180,.25); } .price-strong { font-weight:800; white-space:nowrap; } </style> """,
@@ -832,24 +831,62 @@ st.title("⚡ Komponent Fiyat Karşılaştırma")
 tab_single, tab_basket = st.tabs(["🔍 Tek Ürün", "🛒 Sepet Karşılaştırma"])
 
 with tab_single:
-    query = st.text_input(
-        "Aranacak Komponent:",
-        placeholder="örn: esp32, direnç 10k, mp1584",
-    )
+    query = st.text_input("Aranacak Komponent:", placeholder="örn: esp32, direnç 10k, mp1584")
 
-    if st.button(
-        "Fiyatları Getir",
-        type="primary",
-        use_container_width=True,
-        key="single_search",
-    ):
+    if st.button("Fiyatları Getir", type="primary", use_container_width=True, key="single_search"):
         if not query.strip():
             st.warning("Lütfen bir ürün adı girin.")
         else:
-            with st.spinner("⚡ Mağazalar taranıyor..."):
-                site_results = search_all_selenium(query)
+            search_status = st.empty()
+            live_panel = st.empty()
+            tip_panel = st.empty()
 
-            # Kullanıcıya yalnızca basit bulundu/bulunamadı durumu göster.
+            site_results = []
+            all_products = []
+            site_state = {site: "bekliyor" for site in SEARCH_URL_TEMPLATES}
+            start_time = time.time()
+            tips = [
+                "💡 İpucu: MPN ile arama yapmak benzer ürünleri ayırmayı kolaylaştırır.",
+                "🔎 Fiyat ve stok bilgileri mümkün olduğunca ürün sayfasından doğrulanıyor.",
+                "📦 Stokta olmayan ürünler de listelenir; alternatifleri görebilirsiniz.",
+                "💰 Aynı komponent farklı mağazalarda farklı fiyatlarla satılabilir.",
+            ]
+
+            total_sites = len(SEARCH_URL_TEMPLATES)
+            search_status.markdown(
+                f"### 🔎 **{query}** aranıyor\n"
+                "Mağazalar paralel olarak taranıyor..."
+            )
+
+            for completed, result in enumerate(search_all_selenium_live(query), start=1):
+                site, prods, status, debug_png, debug_html = result
+                site_results.append(result)
+                site_state[site] = "bulundu" if prods else "bulunamadı"
+                all_products.extend(prods)
+
+                elapsed = int(time.time() - start_time)
+                status_lines = []
+                for name, state in site_state.items():
+                    if state == "bulundu":
+                        status_lines.append(f"🟢 **{name}** — bulundu")
+                    elif state == "bulunamadı":
+                        status_lines.append(f"⚪ **{name}** — bulunamadı")
+                    else:
+                        status_lines.append(f"⏳ **{name}** — bekliyor")
+
+                live_panel.info(
+                    f"**📡 Canlı tarama — {completed}/{total_sites} site tamamlandı · "
+                    f"⏱️ {elapsed} sn · 📦 {len(all_products)} ürün**\n\n"
+                    + " • ".join(status_lines)
+                )
+                tip_panel.caption(tips[(completed - 1) % len(tips)])
+
+            elapsed = int(time.time() - start_time)
+            search_status.success(
+                f"✅ Tarama tamamlandı — {total_sites} site · "
+                f"{len(all_products)} ürün · {elapsed} saniye"
+            )
+
             with st.expander("🔍 Site Tarama Durumları", expanded=False):
                 cols = st.columns(3)
                 for idx, (site, prods, _status, _debug_png, _debug_html) in enumerate(site_results):
@@ -859,82 +896,74 @@ with tab_single:
                     else:
                         col.info(f"**{site}** — bulunamadı")
 
-            all_products = [
-                p for _, prods, _, _, _ in site_results for p in prods
-            ]
 
             if not all_products:
                 st.error("Hiçbir sitede sonuç bulunamadı.")
             else:
-                # KRİTİK: Gerçek sayısal fiyat üzerinden ucuzdan pahalıya sırala.
                 all_products.sort(
-                    key=lambda p: (
-                        p.price is None,
-                        p.price if p.price is not None else float("inf"),
-                    )
+                    key=lambda p: (-p.match_score, p.price is None, p.price or 0)
                 )
-
+                data = [
+                    {
+                        "Site": r.site,
+                        "Stok": r.stock,
+                        "MPN": r.mpn,
+                        "Birim Fiyat": f"{r.price:,.2f} TL" if r.price is not None else "—",
+                        "Adet": r.quantity,
+                        "Toplam": (
+                            f"{r.price * r.quantity:,.2f} TL"
+                            if r.price is not None else "—"
+                        ),
+                        "Ürün Adı": r.name,
+                        "Link": r.url,
+                    }
+                    for r in all_products
+                ]
                 st.markdown(
-                    f'<div class="result-title">🔎 Arama Sonuçları ({len(all_products)})</div>',
-                    unsafe_allow_html=True,
+                f'<div class="result-title">🔎 Arama Sonuçları ({len(all_products)})</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.caption(
+                f"🔎 {len(all_products)} sonuç • "
+                f"🟢 {sum(1 for p in all_products if p.stock == 'Var')} stokta • "
+                f"🔴 {sum(1 for p in all_products if p.stock == 'Yok')} stokta yok • "
+                f"⚪ {sum(1 for p in all_products if p.stock == 'Bilinmiyor')} bilinmiyor • "
+                f"💰 {sum(1 for p in all_products if p.price is not None)} fiyat doğrulandı"
+            )
+
+            rows_html = []
+            for idx, r in enumerate(all_products, start=1):
+                if r.stock == "Var":
+                    stock_html = '<span class="stock-badge stock-ok">🟢 Var</span>'
+                elif r.stock == "Yok":
+                    stock_html = '<span class="stock-badge stock-no">🔴 Yok</span>'
+                else:
+                    stock_html = '<span class="stock-badge stock-unknown">⚪ Bilinmiyor</span>'
+
+                price_html = (
+                    f'<span class="price-strong">{r.price:,.2f} TL</span>'
+                    if r.price is not None else "—"
                 )
 
-                st.caption(
-                    f"🔎 {len(all_products)} sonuç • "
-                    f"🟢 {sum(1 for p in all_products if p.stock == 'Var')} stokta • "
-                    f"🔴 {sum(1 for p in all_products if p.stock == 'Yok')} stokta yok • "
-                    f"⚪ {sum(1 for p in all_products if p.stock == 'Bilinmiyor')} bilinmiyor • "
-                    f"💰 {sum(1 for p in all_products if p.price is not None)} fiyat doğrulandı"
+                safe_name = str(r.name).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                safe_site = str(r.site).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                safe_url = str(r.url).replace('"', "&quot;")
+
+                rows_html.append(
+                    f'<tr>'
+                    f'<td>{idx}</td>'
+                    f'<td><b>{safe_site}</b></td>'
+                    f'<td>{safe_name}</td>'
+                    f'<td>{stock_html}</td>'
+                    f'<td>{price_html}</td>'
+                    f'<td><a href="{safe_url}" target="_blank" style="text-decoration:none;font-weight:700;">🌐 Siteye Git</a></td>'
+                    f'</tr>'
                 )
 
-                rows_html = []
-                for idx, r in enumerate(all_products, start=1):
-                    if r.stock == "Var":
-                        stock_html = '<span class="stock-badge stock-ok">🟢 Var</span>'
-                    elif r.stock == "Yok":
-                        stock_html = '<span class="stock-badge stock-no">🔴 Yok</span>'
-                    else:
-                        stock_html = '<span class="stock-badge stock-unknown">⚪ Bilinmiyor</span>'
+            table_html = """ <div style="overflow-x:auto;"> <table style="width:100%;border-collapse:collapse;"> <thead> <tr> <th style="text-align:left;padding:.55rem;">#</th> <th style="text-align:left;padding:.55rem;">Mağaza</th> <th style="text-align:left;padding:.55rem;">Ürün</th> <th style="text-align:left;padding:.55rem;">Stok</th> <th style="text-align:left;padding:.55rem;">Fiyat</th> <th style="text-align:left;padding:.55rem;">Bağlantı</th> </tr> </thead> <tbody> """ + "".join(rows_html) + """ </tbody> </table> </div> """
+            st.markdown(table_html, unsafe_allow_html=True)
 
-                    price_html = (
-                        f'<span class="price-strong">{r.price:,.2f} TL</span>'
-                        if r.price is not None else "—"
-                    )
-
-                    safe_name = (
-                        str(r.name)
-                        .replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-                    )
-                    safe_site = (
-                        str(r.site)
-                        .replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-                    )
-                    safe_url = str(r.url).replace('"', "&quot;")
-
-                    rows_html.append(
-                        f'<tr>'
-                        f'<td>{idx}</td>'
-                        f'<td><b>{safe_site}</b></td>'
-                        f'<td>{safe_name}</td>'
-                        f'<td>{stock_html}</td>'
-                        f'<td>{price_html}</td>'
-                        f'<td><a href="{safe_url}" target="_blank" '
-                        f'style="text-decoration:none;font-weight:700;">🌐 Siteye Git</a></td>'
-                        f'</tr>'
-                    )
-
-                table_html = """ <div style="overflow-x:auto;"> <table style="width:100%;border-collapse:collapse;"> <thead> <tr> <th style="text-align:left;padding:.55rem;">#</th> <th style="text-align:left;padding:.55rem;">Mağaza</th> <th style="text-align:left;padding:.55rem;">Ürün</th> <th style="text-align:left;padding:.55rem;">Stok</th> <th style="text-align:left;padding:.55rem;">Fiyat</th> <th style="text-align:left;padding:.55rem;">Bağlantı</th> </tr> </thead> <tbody> """ + "".join(rows_html) + """ </tbody> </table> </div> """
-                st.markdown(table_html, unsafe_allow_html=True)
-
-
-st.markdown(
-    """ <div style="text-align:center; margin-top:1.5rem; padding:0.7rem 0; color:#888; font-size:0.82rem;"> ⚡ Komponent Fiyat Karşılaştırma<br> <strong>Mehmet Özberk</strong> </div> """,
-    unsafe_allow_html=True,
-)
 
 with tab_basket:
     st.caption("Her satıra bir ürün yazın. Her ürün tüm sitelerde aranıp, hangi sitenin sepetin tamamını en ucuza karşıladığı hesaplanır.")
